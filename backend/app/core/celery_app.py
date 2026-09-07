@@ -45,4 +45,10 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.maintenance_tasks.sweep_abandoned_multipart_uploads",
         "schedule": crontab(hour="*/6", minute="15"),
     },
+    # Supabase free-tier projects pause after 7 days of inactivity (PRD §10).
+    # Daily is ample headroom; removed when the project returns to AWS S3.
+    "storage-keepalive": {
+        "task": "app.tasks.maintenance_tasks.storage_keepalive",
+        "schedule": crontab(hour="6", minute="30"),
+    },
 }

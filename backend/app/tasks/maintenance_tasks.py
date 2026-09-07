@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from app.core.celery_app import celery_app
+from app.services import storage
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +36,30 @@ def reconcile_storage_usage() -> dict[str, str]:
 
 @celery_app.task(name="app.tasks.maintenance_tasks.sweep_abandoned_multipart_uploads")
 def sweep_abandoned_multipart_uploads() -> dict[str, str]:
-    """Abort S3 multipart uploads older than the TTL and reap their pending rows.
+    """Abort multipart uploads older than the TTL and reap their pending rows.
 
     Architecture.md §2 — orphaned parts are a real cost and consistency leak.
+
+    Note for M3: on AWS S3 a bucket lifecycle rule would catch these as a second line
+    of defense. Supabase Storage has no lifecycle rules, so this task is the ONLY
+    thing preventing orphaned parts from accumulating. Implement it properly.
     """
     logger.info("sweep_abandoned_multipart_uploads: not implemented until M3")
     return {"status": "not_implemented", "milestone": "M3"}
+
+
+@celery_app.task(name="app.tasks.maintenance_tasks.storage_keepalive")
+def storage_keepalive() -> dict[str, Any]:
+    """Keep the Supabase project from being auto-paused for inactivity.
+
+    Supabase free-tier projects pause after 7 consecutive days without a request,
+    which would take a portfolio demo offline for anyone visiting weeks later. A
+    cheap periodic HEAD against the bucket resets that timer.
+
+    Temporary: this exists only while Supabase is the storage provider (PRD §10) and
+    is removed when the project returns to AWS S3.
+    """
+    result = storage.check_connectivity()
+    if not result["ok"]:
+        logger.warning("storage_keepalive: storage unreachable (%s)", result.get("detail"))
+    return result

@@ -11,6 +11,7 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from app.core.config import Settings
 from app.core.logging import redact
@@ -21,9 +22,9 @@ from app.services import storage
 
 def test_env_prefix_is_fileshare(monkeypatch: pytest.MonkeyPatch) -> None:
     """Rules.md §2: an AGENCY_-prefixed variable from the n8n project must not leak in."""
-    monkeypatch.setenv("FILESHARE_AWS_REGION", "eu-west-1")
-    monkeypatch.setenv("AGENCY_AWS_REGION", "us-east-1")
-    assert Settings().aws_region == "eu-west-1"
+    monkeypatch.setenv("FILESHARE_SUPABASE_REGION", "eu-west-1")
+    monkeypatch.setenv("AGENCY_SUPABASE_REGION", "us-east-1")
+    assert Settings().supabase_region == "eu-west-1"
 
 
 def test_celery_urls_use_separate_redis_databases() -> None:
@@ -34,14 +35,81 @@ def test_celery_urls_use_separate_redis_databases() -> None:
 
 
 def test_production_startup_requires_real_secrets() -> None:
-    missing = Settings(environment="production").missing_production_secrets()
+    # Every input is passed explicitly: a developer's real .env must not be able to
+    # make this pass by accident.
+    missing = Settings(
+        environment="production",
+        jwt_secret=SecretStr("dev-only-insecure-secret-change-me"),
+        supabase_url=None,
+        supabase_service_role_key=None,
+        supabase_storage_bucket=None,
+        supabase_s3_access_key_id=None,
+        supabase_s3_secret_access_key=None,
+        virustotal_api_key=None,
+        resend_api_key=None,
+    ).missing_production_secrets()
     assert "FILESHARE_JWT_SECRET" in missing
-    assert "FILESHARE_AWS_ACCESS_KEY_ID" in missing
+    assert "FILESHARE_SUPABASE_SERVICE_ROLE_KEY" in missing
+    assert "FILESHARE_SUPABASE_S3_ACCESS_KEY_ID" in missing
+
+
+def test_a_fully_configured_production_setup_reports_nothing_missing() -> None:
+    missing = Settings(
+        environment="production",
+        jwt_secret=SecretStr("a-real-secret"),
+        supabase_url="https://abcdefghijkl.supabase.co",
+        supabase_service_role_key=SecretStr("service-role"),
+        supabase_storage_bucket="fileshare-files",
+        supabase_s3_access_key_id=SecretStr("key"),
+        supabase_s3_secret_access_key=SecretStr("secret"),
+        virustotal_api_key=SecretStr("vt"),
+        resend_api_key=SecretStr("resend"),
+    ).missing_production_secrets()
+    assert missing == []
 
 
 def test_signed_url_ttl_is_short() -> None:
     """Architecture.md §9: download URLs are minutes, not hours."""
     assert Settings().signed_download_url_ttl_seconds <= 900
+
+
+# --- Storage provider wiring (Supabase, per PRD §10) ------------------------------
+
+def test_s3_endpoint_is_derived_from_the_supabase_url() -> None:
+    """Supabase serves the S3 API from the storage hostname, not the project URL."""
+    s = Settings(supabase_url="https://abcdefghijkl.supabase.co")
+    assert s.supabase_project_ref == "abcdefghijkl"
+    assert (
+        s.storage_s3_endpoint
+        == "https://abcdefghijkl.storage.supabase.co/storage/v1/s3"
+    )
+
+
+def test_explicit_endpoint_overrides_derivation() -> None:
+    """Self-hosted Supabase and local MinIO both need to bypass the derived host."""
+    s = Settings(
+        supabase_url="https://abcdefghijkl.supabase.co",
+        storage_endpoint_url="http://localhost:54321/storage/v1/s3",
+    )
+    assert s.storage_s3_endpoint == "http://localhost:54321/storage/v1/s3"
+
+
+def test_endpoint_is_none_without_a_supabase_url() -> None:
+    assert Settings(supabase_url=None).storage_s3_endpoint is None
+
+
+def test_default_quota_fits_inside_the_provider_account_limit() -> None:
+    """A default workspace quota larger than the whole account makes the quota check
+    unreachable — the provider would reject the upload first. PRD §10."""
+    supabase_free_plan_total = 1024 * 1024 * 1024
+    assert Settings().default_storage_quota_bytes <= supabase_free_plan_total
+
+
+def test_provider_file_limit_is_enforced_before_upload() -> None:
+    """Oversized files must be rejected at upload-init, not mid-multipart."""
+    limit = Settings().max_file_size_bytes
+    assert not storage.exceeds_provider_file_limit(limit)
+    assert storage.exceeds_provider_file_limit(limit + 1)
 
 
 # --- Log redaction ---------------------------------------------------------------

@@ -6,6 +6,7 @@ cannot collide with the AGENCY_-prefixed variables of the n8n project sharing th
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -15,7 +16,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 VT_DIRECT_UPLOAD_LIMIT_BYTES = 32 * 1024 * 1024
 VT_LARGE_UPLOAD_LIMIT_BYTES = 650 * 1024 * 1024
 
-DEFAULT_STORAGE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024  # 5GB, per PRD §8
+# Supabase free plan caps a single file at 50MB globally across all buckets.
+# Overridable — this is a plan limit, not a protocol limit.
+SUPABASE_FREE_PLAN_FILE_LIMIT_BYTES = 50 * 1024 * 1024
+
+# 500MB, per the 7 Sep 2026 storage-provider change (PRD §10). Sized to fit inside
+# the Supabase free plan's 1GB account total so quota enforcement is genuinely
+# exercised rather than pre-empted by the provider. Returns to 5GB on AWS S3.
+DEFAULT_STORAGE_QUOTA_BYTES = 500 * 1024 * 1024
 
 
 class Settings(BaseSettings):
@@ -54,12 +62,26 @@ class Settings(BaseSettings):
     # --- Frontend / CORS ---
     frontend_origin: str = "http://localhost:3000"
 
-    # --- AWS S3 ---
-    aws_access_key_id: SecretStr | None = None
-    aws_secret_access_key: SecretStr | None = None
-    aws_region: str = "ap-southeast-1"
-    aws_s3_bucket: str | None = None
-    aws_s3_endpoint_url: str | None = None  # set for MinIO/LocalStack in local dev
+    # --- Supabase Storage ---
+    # Temporary provider (PRD §10). AWS S3 remains the long-term target, so this is
+    # deliberately driven through Supabase's S3-compatible endpoint: boto3, SigV4
+    # presigning, and real multipart upload all work unchanged, which keeps the
+    # eventual move back to AWS close to a credentials swap.
+    supabase_url: str | None = None  # https://<project_ref>.supabase.co
+    supabase_service_role_key: SecretStr | None = None  # bypasses RLS — server only
+    supabase_storage_bucket: str | None = None
+    supabase_region: str = "ap-southeast-1"
+    # S3 protocol credentials, generated in the Supabase dashboard under
+    # Storage settings. Distinct from the service role key: these sign S3 requests.
+    supabase_s3_access_key_id: SecretStr | None = None
+    supabase_s3_secret_access_key: SecretStr | None = None
+    # Overrides the endpoint derived from supabase_url; also the hook for a local
+    # MinIO/LocalStack or self-hosted Supabase.
+    storage_endpoint_url: str | None = None
+    # Provider-side per-file ceiling. Enforced at upload-init so the user gets a clean
+    # rejection instead of a provider error mid-upload.
+    max_file_size_bytes: int = SUPABASE_FREE_PLAN_FILE_LIMIT_BYTES
+
     # Signed URLs are short-lived and single-purpose (Architecture.md §9).
     signed_download_url_ttl_seconds: int = 300
     # A single multipart part upload may legitimately take longer than a download.
@@ -103,12 +125,43 @@ class Settings(BaseSettings):
     def celery_result_backend(self) -> str:
         return _swap_redis_db(self.redis_url, self.celery_result_db)
 
+    @property
+    def supabase_project_ref(self) -> str | None:
+        """Extract the project ref from the Supabase URL.
+
+        `https://abcdefgh.supabase.co` -> `abcdefgh`. The ref is the subdomain, and it
+        is what the S3-compatible storage hostname is built from.
+        """
+        if not self.supabase_url:
+            return None
+        host = urlparse(self.supabase_url).hostname
+        if not host:
+            return None
+        ref = host.split(".", 1)[0]
+        return ref or None
+
+    @property
+    def storage_s3_endpoint(self) -> str | None:
+        """The S3-compatible endpoint boto3 talks to.
+
+        Supabase serves it from the dedicated storage hostname rather than the main
+        project URL: https://<project_ref>.storage.supabase.co/storage/v1/s3
+        """
+        if self.storage_endpoint_url:
+            return self.storage_endpoint_url
+        ref = self.supabase_project_ref
+        if not ref:
+            return None
+        return f"https://{ref}.storage.supabase.co/storage/v1/s3"
+
     def missing_production_secrets(self) -> list[str]:
         """Names of secrets that must be set before this is safe to run in production."""
         required = {
-            "FILESHARE_AWS_ACCESS_KEY_ID": self.aws_access_key_id,
-            "FILESHARE_AWS_SECRET_ACCESS_KEY": self.aws_secret_access_key,
-            "FILESHARE_AWS_S3_BUCKET": self.aws_s3_bucket,
+            "FILESHARE_SUPABASE_URL": self.supabase_url,
+            "FILESHARE_SUPABASE_SERVICE_ROLE_KEY": self.supabase_service_role_key,
+            "FILESHARE_SUPABASE_STORAGE_BUCKET": self.supabase_storage_bucket,
+            "FILESHARE_SUPABASE_S3_ACCESS_KEY_ID": self.supabase_s3_access_key_id,
+            "FILESHARE_SUPABASE_S3_SECRET_ACCESS_KEY": self.supabase_s3_secret_access_key,
             "FILESHARE_VIRUSTOTAL_API_KEY": self.virustotal_api_key,
             "FILESHARE_RESEND_API_KEY": self.resend_api_key,
         }

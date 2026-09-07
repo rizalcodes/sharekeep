@@ -7,7 +7,7 @@ const DEPENDENCY_LABELS: Record<string, string> = {
   database: "PostgreSQL",
   redis: "Redis",
   celery: "Celery worker",
-  storage: "S3 object storage",
+  storage: "Object storage",
 };
 
 type LoadState =

@@ -27,8 +27,9 @@ Prefix all env vars `FILESHARE_` to avoid collisions with other projects running
 
 ## 3. Credential Handling Rules
 
-- AWS credentials, VirusTotal API key, Resend API key: loaded from environment only, never hardcoded, never logged (even at debug level — file contents and credentials must never appear in application logs).
-- S3 access uses **signed URLs** for all client-facing file access (upload and download) — the backend never proxies raw file bytes through itself for large files, and the client never receives a raw/unsigned S3 URL or AWS credentials.
+- Storage credentials (Supabase service role key and S3 access key/secret), VirusTotal API key, Resend API key: loaded from environment only, never hardcoded, never logged (even at debug level — file contents and credentials must never appear in application logs).
+- The **Supabase service role key bypasses Row Level Security entirely**. It is server-side only and must never reach the browser, a client bundle, or a `NEXT_PUBLIC_` variable.
+- Object storage access uses **signed URLs** for all client-facing file access (upload and download) — the backend never proxies raw file bytes through itself for large files, and the client never receives a raw/unsigned storage URL or provider credentials.
 - VirusTotal API calls are rate-limited client-side (reusing the previously-designed `api_keys`/`rate_limit_rules`-style pattern) to stay within the free-tier request budget — do not just retry-on-429 without a proactive limiter.
 
 ## 4. File/Folder Convention (project structure)
@@ -52,7 +53,7 @@ secure-file-sharing/
       schemas/           # Pydantic request/response models
       routers/
       services/
-        storage.py        # S3 signed URL generation, multipart sessions
+        storage.py        # signed URL generation, multipart sessions (provider-agnostic surface)
         scanning.py       # VirusTotal integration + rate limiter
         notifications.py  # Resend email sending
         permissions.py    # the single permission-resolution path (Architecture §4)

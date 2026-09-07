@@ -1,12 +1,27 @@
-"""S3 object storage access.
+"""Object storage access.
 
-Key structure is per-workspace (PRD §8, Architecture.md §8):
+**Provider: Supabase Storage, via its S3-compatible endpoint** (PRD §10, 7 Sep 2026).
+AWS S3 remains the long-term target; Supabase is a sequencing decision, not a scope
+change. Driving it through the S3 protocol rather than Supabase's native REST/TUS
+paths is deliberate — presigned multipart upload works the same way on both, so
+returning to AWS is a credentials-and-endpoint change rather than a rewrite.
+
+Everything below the client factory is provider-agnostic on purpose. Key structure is
+per-workspace (PRD §8, Architecture.md §8):
 
     {workspace_id}/{file_id}/{version_id}/{filename}
 
 Defense in depth: workspace isolation is visible in the key itself, and deleting a
-workspace becomes a single prefix delete. No client ever receives a raw S3 URL or a
-credential — only short-lived, single-purpose signed URLs (Rules.md §3).
+workspace becomes a single prefix delete. No client ever receives a raw storage URL or
+a credential — only short-lived, single-purpose signed URLs (Rules.md §3).
+
+Where Supabase differs from AWS S3, and what it means here:
+  - no lifecycle rules, so abandoned multipart uploads must be swept by the Celery
+    beat task in app/tasks/maintenance_tasks.py — that sweep is now the ONLY
+    protection against orphaned parts, not a second line of defense
+  - no bucket policy / Block Public Access API; privacy is the bucket's `public` flag
+  - no server-side encryption configuration; encryption at rest is provider-managed
+  - no per-bucket CORS configuration
 """
 
 from __future__ import annotations
@@ -28,6 +43,8 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+PROVIDER = "supabase-storage"
+
 _UNSAFE_KEY_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -36,34 +53,40 @@ class StorageError(RuntimeError):
 
 
 @lru_cache
-def get_s3_client() -> BaseClient:
-    """Build the shared boto3 S3 client.
+def get_storage_client() -> BaseClient:
+    """Build the shared boto3 client pointed at Supabase's S3-compatible endpoint.
 
-    SigV4 is pinned because presigned URLs for buckets created after 2014 in newer
-    regions are invalid under SigV2, and the failure mode is a confusing 403.
+    SigV4 is pinned because Supabase's S3 gateway presigns with Signature Version 4
+    only. Path-style addressing is required — the endpoint is a single fixed host and
+    does not resolve virtual-hosted bucket subdomains the way AWS does.
     """
-    if not settings.aws_s3_bucket:
-        raise StorageError("FILESHARE_AWS_S3_BUCKET is not configured")
+    if not settings.supabase_storage_bucket:
+        raise StorageError("FILESHARE_SUPABASE_STORAGE_BUCKET is not configured")
 
-    kwargs: dict[str, Any] = {
-        "region_name": settings.aws_region,
-        "config": Config(
-            signature_version="s3v4",
-            retries={"max_attempts": 3, "mode": "standard"},
-        ),
-    }
-    if settings.aws_access_key_id and settings.aws_secret_access_key:
-        kwargs["aws_access_key_id"] = settings.aws_access_key_id.get_secret_value()
-        kwargs["aws_secret_access_key"] = settings.aws_secret_access_key.get_secret_value()
-    if settings.aws_s3_endpoint_url:
-        # MinIO / LocalStack for local development.
-        kwargs["endpoint_url"] = settings.aws_s3_endpoint_url
-        kwargs["config"] = Config(
+    endpoint = settings.storage_s3_endpoint
+    if not endpoint:
+        raise StorageError(
+            "storage endpoint is not configured — set FILESHARE_SUPABASE_URL "
+            "(or FILESHARE_STORAGE_ENDPOINT_URL)"
+        )
+    if not (settings.supabase_s3_access_key_id and settings.supabase_s3_secret_access_key):
+        raise StorageError(
+            "S3 protocol credentials are not configured — generate them in the "
+            "Supabase dashboard under Storage settings"
+        )
+
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint,
+        region_name=settings.supabase_region,
+        aws_access_key_id=settings.supabase_s3_access_key_id.get_secret_value(),
+        aws_secret_access_key=settings.supabase_s3_secret_access_key.get_secret_value(),
+        config=Config(
             signature_version="s3v4",
             s3={"addressing_style": "path"},
             retries={"max_attempts": 3, "mode": "standard"},
-        )
-    return boto3.client("s3", **kwargs)
+        ),
+    )
 
 
 def sanitize_filename(filename: str) -> str:
@@ -94,14 +117,26 @@ def workspace_prefix(workspace_id: uuid.UUID) -> str:
     return f"{workspace_id}/"
 
 
+def exceeds_provider_file_limit(size_bytes: int) -> bool:
+    """Whether the provider will refuse this file outright.
+
+    Checked at upload-init so an oversized file is rejected cleanly up front rather
+    than failing partway through a multipart upload.
+    """
+    return size_bytes > settings.max_file_size_bytes
+
+
 def generate_download_url(storage_key: str, *, download_filename: str | None = None) -> str:
     """Short-lived, download-only signed URL (Architecture.md §9)."""
-    params: dict[str, Any] = {"Bucket": settings.aws_s3_bucket, "Key": storage_key}
+    params: dict[str, Any] = {
+        "Bucket": settings.supabase_storage_bucket,
+        "Key": storage_key,
+    }
     if download_filename:
         safe = sanitize_filename(download_filename)
         params["ResponseContentDisposition"] = f'attachment; filename="{safe}"'
     try:
-        return get_s3_client().generate_presigned_url(
+        return get_storage_client().generate_presigned_url(
             "get_object",
             Params=params,
             ExpiresIn=settings.signed_download_url_ttl_seconds,
@@ -113,16 +148,25 @@ def generate_download_url(storage_key: str, *, download_filename: str | None = N
 def check_connectivity() -> dict[str, Any]:
     """Readiness probe: can we actually reach the configured bucket?
 
-    Deliberately a HEAD on the bucket rather than a cached flag — the point of a
-    readiness check is to test the real dependency.
+    Deliberately a live HEAD rather than a cached flag — the point of a readiness
+    check is to test the real dependency.
     """
-    if not settings.aws_s3_bucket:
-        return {"ok": False, "detail": "bucket not configured"}
     try:
-        get_s3_client().head_bucket(Bucket=settings.aws_s3_bucket)
+        client = get_storage_client()
+    except StorageError as exc:
+        # Distinguish "you haven't configured this yet" from "it's broken" — the two
+        # need completely different responses from whoever reads the probe.
+        return {"ok": False, "detail": f"not configured: {exc}"}
+    try:
+        client.head_bucket(Bucket=settings.supabase_storage_bucket)
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "unknown")
         return {"ok": False, "detail": f"bucket unreachable ({code})"}
-    except (BotoCoreError, StorageError) as exc:
+    except BotoCoreError as exc:
         return {"ok": False, "detail": f"bucket unreachable ({type(exc).__name__})"}
-    return {"ok": True, "bucket": settings.aws_s3_bucket, "region": settings.aws_region}
+    return {
+        "ok": True,
+        "provider": PROVIDER,
+        "bucket": settings.supabase_storage_bucket,
+        "region": settings.supabase_region,
+    }

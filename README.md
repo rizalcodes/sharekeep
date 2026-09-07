@@ -1,7 +1,7 @@
 # Secure File Sharing Platform
 
 Secure, self-hosted file storage and sharing for teams — workspaces with persistent
-Owner/Editor/Viewer roles, nested folders, chunked large-file upload to S3, malware
+Owner/Editor/Viewer roles, nested folders, chunked large-file upload, malware
 scanning, file versioning, four kinds of share link, and a full audit trail.
 
 Portfolio project #9. Design documents are the source of truth and live in [docs/](docs/):
@@ -16,7 +16,7 @@ Portfolio project #9. Design documents are the source of truth and live in [docs
 | Frontend | Next.js 16 (App Router, TypeScript, Tailwind 4) |
 | Database | PostgreSQL 16 |
 | Jobs | Celery + Redis (worker and beat) |
-| Object storage | AWS S3 (signed URLs only — the API never proxies file bytes) |
+| Object storage | Supabase Storage via its S3-compatible endpoint (signed URLs only — the API never proxies file bytes). AWS S3 is the long-term target; see PRD §10 |
 | Scanning | VirusTotal API (hash lookup first, upload only when necessary) |
 | Email | Resend |
 
@@ -32,7 +32,7 @@ docker compose up -d          # postgres, redis, backend, worker, beat, frontend
 ```
 
 Then check `http://localhost:8000/health/ready` — it probes Postgres, Redis, a live
-Celery worker, and the S3 bucket on every request. The frontend at
+Celery worker, and the storage bucket on every request. The frontend at
 `http://localhost:3000` renders the same checks.
 
 Running the backend directly instead of in Docker:
@@ -45,16 +45,20 @@ python -m venv .venv && ./.venv/Scripts/pip install -r requirements-dev.txt   # 
 ./.venv/Scripts/python -m uvicorn app.main:app --reload
 ```
 
-### S3 bucket
+### Storage bucket
+
+Needs a **new, separate Supabase project** — do not reuse another project's.
 
 ```bash
 cd backend
-python scripts/bootstrap_s3.py            # read-only report, changes nothing
-python scripts/bootstrap_s3.py --apply    # create + configure (idempotent)
+python scripts/bootstrap_storage.py            # read-only report, changes nothing
+python scripts/bootstrap_storage.py --apply    # create + configure (idempotent)
 ```
 
-`--apply` enforces Block Public Access, default encryption, CORS scoped to the frontend
-origin with `ETag` exposed, and a lifecycle rule that aborts abandoned multipart uploads.
+`--apply` creates a private bucket with a per-file size limit. The check additionally
+probes whether the S3 protocol is enabled, whether multipart upload is accepted, and
+whether CORS permits browser-direct upload — the last of which decides the M3 upload
+path and cannot be answered from documentation.
 
 ## Deployment
 

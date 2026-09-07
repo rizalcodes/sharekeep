@@ -47,6 +47,8 @@ services:
   backend:
     build:
       context: ./backend
+    # worker and beat share this exact image - one build, one tag, no drift.
+    image: fileshare-backend:latest
     container_name: fileshare-backend
     restart: unless-stopped
     env_file: [.env]
@@ -63,6 +65,7 @@ services:
   worker:
     build:
       context: ./backend
+    image: fileshare-backend:latest
     container_name: fileshare-celery-worker
     restart: unless-stopped
     command: ["celery", "-A", "app.core.celery_app.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
@@ -84,6 +87,7 @@ services:
   beat:
     build:
       context: ./backend
+    image: fileshare-backend:latest
     container_name: fileshare-celery-beat
     restart: unless-stopped
     command: ["celery", "-A", "app.core.celery_app.celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]

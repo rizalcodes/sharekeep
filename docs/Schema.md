@@ -110,7 +110,7 @@ Represents the current/latest state of a file. Version history is in `file_versi
 | `id` | UUID | required | Primary key |
 | `file_id` | UUID | required | → `files.id` |
 | `version_number` | integer | required | Increments per file, starting at 1 |
-| `storage_key` | string | required | S3 object key: `workspace_id/file_id/version_id/filename` |
+| `storage_key` | string | required | Object key: `workspace_id/file_id/version_id/filename` (provider-agnostic; see Architecture §8) |
 | `size_bytes` | bigint | required | — |
 | `checksum_sha256` | string | optional | SHA-256, computed by the worker on upload finalize. Serves double duty: integrity verification, and the VirusTotal hash lookup (Architecture §3) |
 | `uploaded_by` | UUID | required | → `users.id` |
