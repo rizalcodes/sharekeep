@@ -1,0 +1,32 @@
+# Production overlay for the shared VPS.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Differences from the base stack:
+#   - backend/frontend join the existing reverse-proxy network (the ONLY thing shared
+#     with the n8n project — Architecture.md §7)
+#   - no host port publishing; all ingress goes through the proxy over HTTPS
+#   - Postgres and Redis stay on the internal network only, unreachable from the host
+#
+# Set FILESHARE_PROXY_NETWORK to the name of the reverse proxy's existing Docker
+# network. Confirm the actual name on the VPS before deploying (M8).
+
+services:
+  postgres:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  backend:
+    ports: !reset []
+    networks: [fileshare-internal, proxy]
+
+  frontend:
+    ports: !reset []
+    networks: [fileshare-internal, proxy]
+
+networks:
+  proxy:
+    external: true
+    name: ${FILESHARE_PROXY_NETWORK:-proxy}

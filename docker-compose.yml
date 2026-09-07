@@ -1,0 +1,121 @@
+# Secure File Sharing Platform — own Compose stack.
+#
+# This is a SEPARATE stack from the n8n project sharing the same VPS (Rules.md §7,
+# Architecture.md §7). Own project name, own Postgres, own Redis, own credentials.
+# The two stacks meet only at the shared reverse-proxy network, which is added by
+# docker-compose.prod.yml — this base file is self-contained for local development.
+
+name: fileshare
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fileshare-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${FILESHARE_POSTGRES_USER:-fileshare}
+      POSTGRES_PASSWORD: ${FILESHARE_POSTGRES_PASSWORD:?FILESHARE_POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${FILESHARE_POSTGRES_DB:-fileshare}
+    volumes:
+      - fileshare-postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${FILESHARE_POSTGRES_PORT:-5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FILESHARE_POSTGRES_USER:-fileshare} -d ${FILESHARE_POSTGRES_DB:-fileshare}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [fileshare-internal]
+
+  redis:
+    image: redis:7-alpine
+    container_name: fileshare-redis
+    restart: unless-stopped
+    # Dedicated instance, not a shared DB index on the n8n project's Redis.
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - fileshare-redis-data:/data
+    ports:
+      - "127.0.0.1:${FILESHARE_REDIS_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [fileshare-internal]
+
+  backend:
+    build:
+      context: ./backend
+    container_name: fileshare-backend
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      FILESHARE_DATABASE_URL: postgresql+asyncpg://${FILESHARE_POSTGRES_USER:-fileshare}:${FILESHARE_POSTGRES_PASSWORD}@postgres:5432/${FILESHARE_POSTGRES_DB:-fileshare}
+      FILESHARE_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    ports:
+      - "127.0.0.1:${FILESHARE_BACKEND_PORT:-8000}:8000"
+    networks: [fileshare-internal]
+
+  worker:
+    build:
+      context: ./backend
+    container_name: fileshare-celery-worker
+    restart: unless-stopped
+    command: ["celery", "-A", "app.core.celery_app.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    env_file: [.env]
+    environment:
+      FILESHARE_DATABASE_URL: postgresql+asyncpg://${FILESHARE_POSTGRES_USER:-fileshare}:${FILESHARE_POSTGRES_PASSWORD}@postgres:5432/${FILESHARE_POSTGRES_DB:-fileshare}
+      FILESHARE_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.core.celery_app.celery_app inspect ping -d celery@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks: [fileshare-internal]
+
+  beat:
+    build:
+      context: ./backend
+    container_name: fileshare-celery-beat
+    restart: unless-stopped
+    command: ["celery", "-A", "app.core.celery_app.celery_app", "beat", "--loglevel=INFO", "--schedule=/tmp/celerybeat-schedule"]
+    env_file: [.env]
+    environment:
+      FILESHARE_DATABASE_URL: postgresql+asyncpg://${FILESHARE_POSTGRES_USER:-fileshare}:${FILESHARE_POSTGRES_PASSWORD}@postgres:5432/${FILESHARE_POSTGRES_DB:-fileshare}
+      FILESHARE_REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis: {condition: service_healthy}
+    # Beat serves no HTTP, so the image's API healthcheck would always fail here and
+    # report a false "unhealthy". Beat has no equivalent self-check worth faking;
+    # its liveness is observable from whether scheduled tasks actually arrive.
+    healthcheck:
+      disable: true
+    networks: [fileshare-internal]
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: fileshare-frontend
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${FILESHARE_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    depends_on: [backend]
+    ports:
+      - "127.0.0.1:${FILESHARE_FRONTEND_PORT:-3000}:3000"
+    networks: [fileshare-internal]
+
+volumes:
+  fileshare-postgres-data:
+  fileshare-redis-data:
+
+networks:
+  fileshare-internal:
+    name: fileshare-internal

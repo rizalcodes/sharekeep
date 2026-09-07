@@ -1,0 +1,86 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Design tokens — LOCKED at M0 (Design.md §7).
+   Cooler, neutral, security-conscious palette; deliberately distinct from the
+   warm palette used in ecommerce-ai-platform.
+
+   Status colours are reserved. They mean scan state and permission-critical
+   state ONLY — never decoration (Design.md §3).
+   --------------------------------------------------------------------------- */
+
+:root {
+  /* Surfaces */
+  --color-canvas: #fafafa;
+  --color-surface: #ffffff;
+  --color-surface-sunken: #f2f4f6;
+  --color-border: #e0e4e8;
+  --color-border-strong: #c6ccd4;
+
+  /* Text — dark slate, never pure black */
+  --color-ink: #1f2933;
+  --color-ink-muted: #52606d;
+  --color-ink-subtle: #7b8794;
+
+  /* Primary — deep navy slate: trust without generic "tech blue" */
+  --color-primary: #1e3a5f;
+  --color-primary-hover: #2c5282;
+  --color-primary-subtle: #eaeff5;
+  --color-primary-ink: #ffffff;
+
+  /* Scan / status. Five states, matching Architecture.md §3 exactly. */
+  --color-status-clean: #157f3d;
+  --color-status-clean-subtle: #e8f5ed;
+  --color-status-scanning: #b7791f;
+  --color-status-scanning-subtle: #fdf4e3;
+  --color-status-flagged: #b42318;
+  --color-status-flagged-subtle: #fdeceb;
+  --color-status-unscanned: #6b7280;
+  --color-status-unscanned-subtle: #f1f2f4;
+
+  /* Focus ring — visible, never removed */
+  --color-focus: #2c5282;
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+}
+
+@theme inline {
+  --color-canvas: var(--color-canvas);
+  --color-surface: var(--color-surface);
+  --color-surface-sunken: var(--color-surface-sunken);
+  --color-border: var(--color-border);
+  --color-border-strong: var(--color-border-strong);
+  --color-ink: var(--color-ink);
+  --color-ink-muted: var(--color-ink-muted);
+  --color-ink-subtle: var(--color-ink-subtle);
+  --color-primary: var(--color-primary);
+  --color-primary-hover: var(--color-primary-hover);
+  --color-primary-subtle: var(--color-primary-subtle);
+  --color-primary-ink: var(--color-primary-ink);
+  --color-status-clean: var(--color-status-clean);
+  --color-status-clean-subtle: var(--color-status-clean-subtle);
+  --color-status-scanning: var(--color-status-scanning);
+  --color-status-scanning-subtle: var(--color-status-scanning-subtle);
+  --color-status-flagged: var(--color-status-flagged);
+  --color-status-flagged-subtle: var(--color-status-flagged-subtle);
+  --color-status-unscanned: var(--color-status-unscanned);
+  --color-status-unscanned-subtle: var(--color-status-unscanned-subtle);
+
+  --font-sans: var(--font-inter);
+  --font-display: var(--font-plex);
+  --font-mono: var(--font-plex-mono);
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-inter), system-ui, sans-serif;
+}
+
+/* Never remove the focus ring — keyboard access is part of the trust story. */
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}

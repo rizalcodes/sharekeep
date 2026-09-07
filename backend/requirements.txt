@@ -1,0 +1,29 @@
+# Web framework
+fastapi>=0.115,<0.120
+uvicorn[standard]>=0.32,<0.40
+python-multipart>=0.0.12,<0.1
+
+# Config / validation
+pydantic>=2.9,<3
+pydantic-settings>=2.6,<3
+email-validator>=2.2,<3
+
+# Database
+SQLAlchemy[asyncio]>=2.0.36,<2.1
+asyncpg>=0.30,<0.31
+alembic>=1.14,<2
+greenlet>=3.1,<4
+
+# Background jobs
+celery[redis]>=5.4,<6
+redis>=5.2,<7
+
+# Object storage
+boto3>=1.35,<2
+
+# Auth
+pyjwt>=2.10,<3
+argon2-cffi>=23.1,<26
+
+# Outbound HTTP (VirusTotal, Resend)
+httpx>=0.27,<0.29
