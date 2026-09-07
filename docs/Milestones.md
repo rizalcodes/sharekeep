@@ -5,7 +5,7 @@ has actually been performed, not when the code merely exists (Rules.md §6).
 
 | # | Deliverable | Status |
 |---|---|---|
-| M0 | Project scaffold: FastAPI backend, Next.js frontend, Docker Compose, Celery+Redis wired, storage bucket configured | In progress |
+| M0 | Project scaffold: FastAPI backend, Next.js frontend, Docker Compose, Celery+Redis wired, storage bucket configured | **Done** (7 Sep 2026) |
 | M1 | Auth + workspace + RBAC (Owner/Editor/Viewer), workspace invitations | Not started |
 | M2 | File/folder CRUD, nested folders, storage quota enforcement | Not started |
 | M3 | Upload pipeline: drag & drop + chunked multipart upload to object storage | Not started |
@@ -106,7 +106,12 @@ same day (PRD §10). Every row below was actually executed, not reasoned about.
 | Storage keepalive round trip | `storage_keepalive.delay()` from the backend container | executed, returned the storage status |
 | Storage probe names the gap | `GET /health/ready` with no storage config | reports the exact missing variable, not a generic error |
 | Bootstrap script without credentials | `scripts/bootstrap_storage.py` | exits 1 with a clear message, changes nothing |
-| Storage bucket configured | `scripts/bootstrap_storage.py --apply` | **not done — needs the new Supabase project's credentials** |
+| Storage bucket configured | `scripts/bootstrap_storage.py --apply` | private, 50MB/file limit, S3 protocol + multipart accepted |
+| Readiness fully green | `GET /health/ready` with the bucket live | `status: ready`, HTTP 200, all four dependencies ok |
+| **Multipart upload round trip** | real 2-part (6MB+1MB) upload via presigned URLs, then presigned GET | bytes intact, SHA-256 match |
+| ETag exposed to the browser | `access-control-expose-headers` on the part response | `etag` — the client can report part ETags back |
+| Content-Disposition forces download | presigned GET with a download filename | `attachment; filename="proof.bin"` |
+| **Unsigned URL is rejected** | adversarial: fetch the raw object URL with no signature | HTTP 403 |
 
 Four fixes came out of executing rather than reviewing:
 
@@ -139,14 +144,31 @@ frontend's dependency label, tests, and every doc that named S3.
 The storage-key and traversal tests **passed unchanged**, which is the useful signal:
 they assert key shape, not provider, so the abstraction held.
 
+### Storage bucket brought up (7 Sep 2026)
+
+Bucket `fileshare-files` created on a new, separate Supabase project: private, 50MB
+per-file limit, S3 protocol enabled, multipart accepted.
+
+**The CORS question is settled — browser-direct upload works.** The preflight returns
+`access-control-allow-origin: *` and, more importantly, a real two-part multipart upload
+through presigned URLs succeeded end to end with the bytes verified by SHA-256. So
+Architecture §2 step 4 stands as designed: no TUS fallback, and no proxying file bytes
+through the API. `access-control-expose-headers: etag` confirms the browser can read
+part ETags back, which the flow depends on.
+
+Two defects found here, both only findable by running it:
+
+1. **Supabase reports a missing bucket as HTTP 400, not 404**, with the real status
+   buried in the body (`{"statusCode":"404","code":"NoSuchBucket"}`). The first `--apply`
+   crashed with an unhandled `HTTPStatusError` instead of creating the bucket.
+2. **The region default was wrong**, and a wrong region fails SigV4 signing as a bare
+   `403` with no explanatory message — indistinguishable from "S3 access not enabled".
+   Established empirically that the gateway accepts the project's real region
+   (`ap-south-1`) plus `us-east-1` as a generic fallback, and rejects everything else.
+   The bootstrap script now names the region as the likely cause in its failure message.
+
 ### Open at the end of M0
 
-- **Supabase credentials not supplied**, so the bucket has not been created or verified.
-  This is the one M0 deliverable not complete. Everything around it is in place —
-  `scripts/bootstrap_storage.py --apply` finishes it in one command once the keys land.
-- **CORS for browser-direct upload is unproven.** The bootstrap script's preflight probe
-  settles it, but needs real credentials to run. This decides the M3 upload path
-  (PRD §10).
 - **VirusTotal and Resend keys** not supplied. Not needed until M4 and M6.
 - **Rate-limiting reference document** (`api_keys` / `rate_limit_rules` pattern) not
   located. Needed at M4; the limiter will be designed fresh if it does not surface.

@@ -63,9 +63,26 @@ def _api() -> httpx.Client:
     )
 
 
+def _is_not_found(response: httpx.Response) -> bool:
+    """Supabase reports a missing bucket as HTTP 400, not 404.
+
+    The real status hides in the body: {"statusCode":"404","code":"NoSuchBucket",...}.
+    Checking the transport status alone turns "bucket does not exist yet" into a crash.
+    """
+    if response.status_code == 404:
+        return True
+    if response.status_code != 400:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return body.get("code") == "NoSuchBucket" or str(body.get("statusCode")) == "404"
+
+
 def get_bucket(client: httpx.Client, bucket: str) -> dict | None:
     response = client.get(f"/bucket/{bucket}")
-    if response.status_code == 404:
+    if _is_not_found(response):
         return None
     response.raise_for_status()
     return response.json()
@@ -135,7 +152,13 @@ def check_s3_protocol() -> bool:
     if result["ok"]:
         _ok("S3 protocol", endpoint)
         return True
-    _bad("S3 protocol", f"{result['detail']} - is the S3 connection enabled in the dashboard?")
+    _bad(
+        "S3 protocol",
+        f"{result['detail']} - most often FILESHARE_SUPABASE_REGION "
+        f"(currently {settings.supabase_region!r}) not matching the project's real "
+        "region, which fails SigV4 signing as a bare 403; otherwise the S3 "
+        "connection is not enabled in the dashboard",
+    )
     return False
 
 

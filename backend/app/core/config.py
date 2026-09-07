@@ -70,7 +70,9 @@ class Settings(BaseSettings):
     supabase_url: str | None = None  # https://<project_ref>.supabase.co
     supabase_service_role_key: SecretStr | None = None  # bypasses RLS — server only
     supabase_storage_bucket: str | None = None
-    supabase_region: str = "ap-southeast-1"
+    # Must match the project's real region or SigV4 signing fails with a bare 403.
+    # us-east-1 is the safe default: Supabase accepts it as a generic fallback.
+    supabase_region: str = "us-east-1"
     # S3 protocol credentials, generated in the Supabase dashboard under
     # Storage settings. Distinct from the service role key: these sign S3 requests.
     supabase_s3_access_key_id: SecretStr | None = None
