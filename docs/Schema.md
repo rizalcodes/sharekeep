@@ -1,0 +1,240 @@
+# Schema: Secure File Sharing Platform — Data Entities
+
+**Scope note:** this document covers **data schema only** — field names, types, required/optional, and relations. Naming/credential conventions live in `Rules.md`; system/workflow design lives in `Architecture.md`.
+
+**Version:** v1.1 — amended 7 September 2026 at kickoff, before M0. See §14 for the amendment log.
+
+**Conventions:**
+- snake_case for all field and table names, plural table names.
+- `id` = UUID primary key on every table.
+- `created_at` / `updated_at` on every table (plus entity-specific timestamps where relevant).
+- Foreign keys named `<referenced_entity_singular>_id`.
+- Soft delete: entities that can be deleted by a user carry `deleted_at` (nullable). A non-NULL `deleted_at` means the row is hidden from all normal queries but retained so `audit_logs` entries still resolve to a real row.
+
+---
+
+## 1. `users`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | UUID | required | Primary key |
+| `email` | string | required, unique | — |
+| `hashed_password` | string | required | Never store plaintext (Argon2) |
+| `full_name` | string | required | — |
+| `created_at` / `updated_at` | datetime | required | — |
+
+## 2. `workspaces`
+
+Represents a team/collaboration space. A user's personal space is also a workspace (with only them as Owner), created automatically on signup.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | UUID | required | Primary key |
+| `name` | string | required | — |
+| `owner_id` | UUID | required | → `users.id`, the workspace creator |
+| `is_personal` | boolean | required, default false | True for the auto-created signup workspace; personal workspaces cannot be deleted while the user exists |
+| `storage_quota_bytes` | bigint | required, default 5368709120 (5GB) | Configurable per workspace |
+| `storage_used_bytes` | bigint | required, default 0 | Running total; updated transactionally on upload/delete, reconciled periodically (Architecture §6) |
+| `created_at` / `updated_at` | datetime | required | — |
+
+## 3. `workspace_members`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | UUID | required | Primary key |
+| `workspace_id` | UUID | required | → `workspaces.id` |
+| `user_id` | UUID | required | → `users.id` |
+| `role` | enum(`owner`, `editor`, `viewer`) | required | Workspace-level default role |
+| `created_at` / `updated_at` | datetime | required | `updated_at` matters here — role changes are audited |
+
+**Constraints:** UNIQUE (`workspace_id`, `user_id`) — a user holds exactly one workspace-level role per workspace.
+
+## 4. `workspace_invitations`
+
+Added in v1.1. Without this, there is no path for adding a collaborator who is not already a registered user, and no pending state between "invited" and "member".
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | UUID | required | Primary key |
+| `workspace_id` | UUID | required | → `workspaces.id` |
+| `email` | string | required | Invitee's email; may or may not correspond to an existing `users` row |
+| `role` | enum(`owner`, `editor`, `viewer`) | required | Role granted on acceptance |
+| `token` | string | required, unique | Cryptographically random, unguessable — the invite link identifier |
+| `status` | enum(`pending`, `accepted`, `revoked`, `expired`) | required, default `pending` | — |
+| `invited_by` | UUID | required | → `users.id` |
+| `accepted_by` | UUID | optional | → `users.id`; set on acceptance |
+| `expires_at` | datetime | required | Invitations are always time-bounded (default 7 days) |
+| `created_at` / `updated_at` | datetime | required | — |
+
+**Constraints:** UNIQUE (`workspace_id`, `email`) WHERE `status = 'pending'` — one live invitation per email per workspace.
+
+## 5. `folders`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | UUID | required | Primary key |
+| `workspace_id` | UUID | required | → `workspaces.id` |
+| `parent_folder_id` | UUID | optional | → `folders.id`; `NULL` = root of workspace |
+| `name` | string | required | — |
+| `created_by` | UUID | required | → `users.id` |
+| `deleted_at` | datetime | optional | Soft delete; deleting a folder soft-deletes its descendants |
+| `created_at` / `updated_at` | datetime | required | — |
+
+**Constraints:** UNIQUE (`workspace_id`, `parent_folder_id`, `name`) WHERE `deleted_at IS NULL`. Because Postgres treats NULLs as distinct in unique indexes, root-level folders (`parent_folder_id IS NULL`) need `NULLS NOT DISTINCT` (PG15+) or a partial index on a COALESCE'd expression — pick one at implementation time and state it in the migration.
+
+## 6. `files`
+
+Represents the current/latest state of a file. Version history is in `file_versions`.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | UUID | required | Primary key |
+| `workspace_id` | UUID | required | → `workspaces.id` |
+| `folder_id` | UUID | optional | → `folders.id`; `NULL` = workspace root |
+| `name` | string | required | — |
+| `mime_type` | string | required | — |
+| `size_bytes` | bigint | required | Size of the current version |
+| `current_version_id` | UUID | **optional** | → `file_versions.id`. Nullable by necessity: `file_versions.file_id` is required, so the file row must exist before its first version row. Set immediately after the first version is created, and non-NULL for every file that has completed an upload. |
+| `scan_status` | enum(`pending`, `scanning`, `clean`, `flagged`, `scan_skipped`, `scan_failed`) | required, default `pending` | Malware scan state of the current version (mirrors `file_versions.scan_status`) |
+| `tags` | text[] | required, default `{}` | Backs the tag half of PRD §4's "filename/metadata/tag search" |
+| `created_by` | UUID | required | → `users.id` |
+| `deleted_at` | datetime | optional | Soft delete |
+| `created_at` / `updated_at` | datetime | required | — |
+
+**Constraints:** UNIQUE (`workspace_id`, `folder_id`, `name`) WHERE `deleted_at IS NULL` — this is what makes "re-upload with the same name creates a new version" well-defined. Same NULL-handling caveat as `folders`. GIN index on `tags`.
+
+## 7. `file_versions`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | UUID | required | Primary key |
+| `file_id` | UUID | required | → `files.id` |
+| `version_number` | integer | required | Increments per file, starting at 1 |
+| `storage_key` | string | required | S3 object key: `workspace_id/file_id/version_id/filename` |
+| `size_bytes` | bigint | required | — |
+| `checksum_sha256` | string | optional | SHA-256, computed by the worker on upload finalize. Serves double duty: integrity verification, and the VirusTotal hash lookup (Architecture §3) |
+| `uploaded_by` | UUID | required | → `users.id` |
+| `scan_status` | enum(`pending`, `scanning`, `clean`, `flagged`, `scan_skipped`, `scan_failed`) | required, default `pending` | Per-version scan result |
+| `scan_detail` | jsonb | optional | Scanner response summary (engine hit counts, VT analysis id, or the reason for `scan_skipped`) |
+| `deleted_at` | datetime | optional | Soft delete; set when the parent file is deleted or a single version is pruned |
+| `created_at` | datetime | required | — |
+
+**Constraints:** UNIQUE (`file_id`, `version_number`).
+
+## 8. `file_permissions`
+
+Explicit permission grants for a file or folder to a specific workspace member, overriding the workspace-level default role where present. Resolution order and inheritance are defined in Architecture §4.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | UUID | required | Primary key |
+| `file_id` | UUID | optional | → `files.id` (mutually exclusive with `folder_id`) |
+| `folder_id` | UUID | optional | → `folders.id` (mutually exclusive with `file_id`) |
+| `user_id` | UUID | required | → `users.id` |
+| `role` | enum(`owner`, `editor`, `viewer`) | required | — |
+| `granted_by` | UUID | required | → `users.id` |
+| `created_at` / `updated_at` | datetime | required | — |
+
+**Constraints:**
+- CHECK (`num_nonnulls(file_id, folder_id) = 1`) — exactly one target, enforced in the database, not just in application code.
+- UNIQUE (`file_id`, `user_id`) and UNIQUE (`folder_id`, `user_id`) — one explicit grant per user per target.
+
+## 9. `share_links`
+
+**v1 scope:** share links target files only, not folders. Recorded here as a deliberate decision rather than an omission — folder sharing would require the link's access check to walk the folder tree on every request, which is meaningful extra surface area on the most security-sensitive path in the system.
+
+**Type vs. modifiers (v1.1 clarification):** `link_type` is the link's *primary* access rule. `expires_at`, `max_downloads`, and `hashed_password` are **independent modifiers** that may be combined with any type. This is what makes "password-protected AND expiring" — the most common real-world combination — representable; the earlier single-enum reading made it impossible.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | UUID | required | Primary key |
+| `file_id` | UUID | required | → `files.id` |
+| `token` | string | required, unique | Cryptographically random, unguessable — never derived from `file_id` |
+| `link_type` | enum(`public`, `private`, `password_protected`, `expiring`) | required | Primary access rule |
+| `hashed_password` | string | optional | **Required** if `link_type = password_protected`; **allowed** on any other type as a modifier |
+| `allowed_user_id` | UUID | optional | → `users.id`; required if `link_type = private`. v1 supports a single allowed user per link — create multiple links for multiple recipients |
+| `expires_at` | datetime | optional | **Required** if `link_type = expiring`; **allowed** on any other type as a modifier |
+| `max_downloads` | integer | optional | Modifier, valid on any type |
+| `download_count` | integer | required, default 0 | — |
+| `created_by` | UUID | required | → `users.id` |
+| `revoked_at` | datetime | optional | Manual revocation before expiry |
+| `created_at` / `updated_at` | datetime | required | — |
+
+**Constraints:** CHECK enforcing the three type requirements above (`password_protected` ⇒ `hashed_password IS NOT NULL`; `expiring` ⇒ `expires_at IS NOT NULL`; `private` ⇒ `allowed_user_id IS NOT NULL`).
+
+## 10. `audit_logs`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | UUID | required | Primary key |
+| `workspace_id` | UUID | required | → `workspaces.id` |
+| `actor_id` | UUID | optional | → `users.id`; `NULL` if the action was via an anonymous share link |
+| `action` | enum — see below | required | — |
+| `target_type` | enum(`file`, `folder`, `share_link`, `workspace_member`, `workspace_invitation`, `workspace`) | required | — |
+| `target_id` | UUID | required | ID of the affected row (soft delete guarantees it still resolves) |
+| `ip_address` | inet | optional | **Added v1.1.** Without this, an anonymous share-link download logs `actor_id = NULL` and nothing identifying — forensically useless for a security product |
+| `user_agent` | string | optional | **Added v1.1.** Same reasoning |
+| `metadata` | jsonb | optional | Action-specific detail (e.g. which permission changed to what, or the denial reason) |
+| `created_at` | datetime | required | — |
+
+**`action` enum (expanded in v1.1):** `upload`, `download`, `share_created`, `share_revoked`, `share_accessed`, `share_access_denied`, `delete`, `permission_changed`, `version_restored`, `folder_created`, `folder_deleted`, `login`, `login_failed`, `member_added`, `member_removed`, `member_role_changed`, `invitation_sent`, `invitation_accepted`, `scan_flagged`, `quota_exceeded`.
+
+The `share_accessed` / `share_access_denied` pair exists because Architecture §4.5 requires logging every resolution attempt, success **and** failure — the original enum had no way to express a failed attempt, which is precisely the event a security audit log exists to capture.
+
+Audit logs are append-only: no update or delete path in the application.
+
+## 11. `notifications`
+
+Designed to be channel-agnostic (WebSocket-ready for v1.1) even though v1 only sends email.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | UUID | required | Primary key |
+| `user_id` | UUID | required | → `users.id`, the recipient |
+| `workspace_id` | UUID | optional | → `workspaces.id`; context for rendering and future per-workspace filtering |
+| `type` | enum(`file_shared`, `permission_granted`, `storage_quota_warning`, `scan_flagged`, `workspace_invitation`) | required | — |
+| `payload` | jsonb | required | Structured data for rendering the notification (e.g. file name, actor) |
+| `channel` | enum(`email`) | required, default `email` | Extensible for `websocket` in v1.1 without a schema change |
+| `status` | enum(`pending`, `sent`, `failed`) | required, default `pending` | — |
+| `read_at` | datetime | optional | For future in-app read-state tracking |
+| `created_at` / `updated_at` | datetime | required | — |
+
+---
+
+## 12. Relation Summary
+
+```
+users (1) ──< workspace_members >── (1) workspaces
+workspaces (1) ──< workspace_invitations
+workspaces (1) ──< folders
+workspaces (1) ──< files
+folders (1) ──< folders                (self-referencing, nested)
+folders (1) ──< files
+files (1) ──< file_versions            (files.current_version_id → file_versions.id, nullable)
+files (1) ──< file_permissions
+folders (1) ──< file_permissions
+files (1) ──< share_links
+workspaces (1) ──< audit_logs
+users (1) ──< notifications
+```
+
+## 13. Future Considerations (deliberately out of v1)
+
+- **Full-text content indexing** for search — would need a separate `file_content_index` entity if added later.
+- **`notifications.channel = 'websocket'`** — the enum is already extensible for this; no schema change needed, just a new delivery path in v1.1.
+- **Folder-level share links** — see §9; deferred on security-surface grounds, not cost.
+- **Multi-recipient private links** — would need a `share_link_recipients` join table.
+
+## 14. Amendment Log — v1.1 (7 Sep 2026, pre-M0)
+
+Issues found reading v1.0 against `Architecture.md` and `PRD.md`, fixed before M0:
+
+1. **Circular FK made inserts impossible.** `files.current_version_id` was required while `file_versions.file_id` is also required — neither row could be created first. `current_version_id` is now nullable.
+2. **`audit_logs.action` could not express a failed access attempt**, which Architecture §4.5 explicitly requires. Enum expanded; `ip_address` / `user_agent` added.
+3. **Tags were in the PRD but not the schema.** `files.tags` added.
+4. **No invitation path existed** — `workspace_members` assumed the invitee was already a registered user. `workspace_invitations` added.
+5. **No soft delete**, so `audit_logs.target_id` would dangle after any deletion. `deleted_at` added to folders, files, file_versions.
+6. **Share links could not combine password + expiry.** Type/modifier split documented.
+7. **Missing constraints** that the design depends on: file/folder mutual exclusivity, name uniqueness for versioning, one role per user per workspace.
+8. **`updated_at` missing** on several tables despite the stated convention.
+9. **`scan_skipped` added** to the scan status enums — see Architecture §3 for the VirusTotal size ceiling that requires it.
