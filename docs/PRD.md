@@ -79,8 +79,8 @@ A secure, self-hosted file storage and sharing platform — think a scoped-down 
 |---|---|
 | M0 | Project scaffold (FastAPI backend, Next.js frontend, Docker Compose on the shared VPS, Celery+Redis wired, storage bucket configured) |
 | M1 | Auth + workspace + RBAC (Owner/Editor/Viewer) |
-| M2 | Core file/folder CRUD + nested folder structure + storage quota enforcement |
-| M3 | Upload pipeline: drag & drop + chunked/multipart upload to object storage |
+| M2 | Core file/folder CRUD + nested folders + per-file/folder permissions + chunked upload API + storage quota enforcement |
+| M3 | Upload UX: drag & drop, accurate per-chunk progress, resume/retry on the frontend |
 | M4 | Malware scanning (Celery + VirusTotal) + file versioning |
 | M5 | Sharing: all 4 link types + password protection + expiration |
 | M6 | Audit log + email notifications (Resend) |

@@ -2,7 +2,7 @@
 
 **Scope note:** this document covers **data schema only** — field names, types, required/optional, and relations. Naming/credential conventions live in `Rules.md`; system/workflow design lives in `Architecture.md`.
 
-**Version:** v1.2 — amended 8 September 2026 at the start of M1. Previously v1.1 (kickoff, before M0). See §15 for the amendment log.
+**Version:** v1.3 — amended 8 September 2026 at the start of M2. Previously v1.2 (start of M1) and v1.1 (kickoff, before M0). See §15 for the amendment log.
 
 **Conventions:**
 - snake_case for all field and table names, plural table names.
@@ -79,6 +79,7 @@ Added in v1.1. Without this, there is no path for adding a collaborator who is n
 | `name` | string | required | — |
 | `created_by` | UUID | required | → `users.id` |
 | `deleted_at` | datetime | optional | Soft delete; deleting a folder soft-deletes its descendants |
+| `deletion_batch_id` | UUID | optional | **Added v1.3.** Set on every row soft-deleted by one delete operation. Restore only revives rows sharing the batch id, so restoring a folder does not resurrect items the user had deleted separately beforehand. |
 | `created_at` / `updated_at` | datetime | required | — |
 
 **Constraints:** UNIQUE (`workspace_id`, `parent_folder_id`, `name`) WHERE `deleted_at IS NULL`. Because Postgres treats NULLs as distinct in unique indexes, root-level folders (`parent_folder_id IS NULL`) need `NULLS NOT DISTINCT` (PG15+) or a partial index on a COALESCE'd expression — pick one at implementation time and state it in the migration.
@@ -94,12 +95,13 @@ Represents the current/latest state of a file. Version history is in `file_versi
 | `folder_id` | UUID | optional | → `folders.id`; `NULL` = workspace root |
 | `name` | string | required | — |
 | `mime_type` | string | required | — |
-| `size_bytes` | bigint | required | Size of the current version |
+| `size_bytes` | bigint | required | Size of the **current** version. Note this is *not* what the file consumes: quota counts every retained version (see §7 and Architecture §6). |
 | `current_version_id` | UUID | **optional** | → `file_versions.id`. Nullable by necessity: `file_versions.file_id` is required, so the file row must exist before its first version row. Set immediately after the first version is created, and non-NULL for every file that has completed an upload. |
 | `scan_status` | enum(`pending`, `scanning`, `clean`, `flagged`, `scan_skipped`, `scan_failed`) | required, default `pending` | Malware scan state of the current version (mirrors `file_versions.scan_status`) |
 | `tags` | text[] | required, default `{}` | Backs the tag half of PRD §4's "filename/metadata/tag search" |
 | `created_by` | UUID | required | → `users.id` |
 | `deleted_at` | datetime | optional | Soft delete |
+| `deletion_batch_id` | UUID | optional | **Added v1.3.** See `folders`. |
 | `created_at` / `updated_at` | datetime | required | — |
 
 **Constraints:** UNIQUE (`workspace_id`, `folder_id`, `name`) WHERE `deleted_at IS NULL` — this is what makes "re-upload with the same name creates a new version" well-defined. Same NULL-handling caveat as `folders`. GIN index on `tags`.
@@ -118,9 +120,22 @@ Represents the current/latest state of a file. Version history is in `file_versi
 | `scan_status` | enum(`pending`, `scanning`, `clean`, `flagged`, `scan_skipped`, `scan_failed`) | required, default `pending` | Per-version scan result |
 | `scan_detail` | jsonb | optional | Scanner response summary (engine hit counts, VT analysis id, or the reason for `scan_skipped`) |
 | `deleted_at` | datetime | optional | Soft delete; set when the parent file is deleted or a single version is pruned |
+| `deletion_batch_id` | UUID | optional | **Added v1.3.** See `folders`. |
 | `created_at` | datetime | required | — |
 
 **Constraints:** UNIQUE (`file_id`, `version_number`).
+
+**Retention (v1.3):** at most **10 retained versions per file**. On upload of an 11th,
+the oldest surviving version is pruned — its row soft-deleted and its object removed by
+the retention sweep. Without a cap, re-uploading one file repeatedly can exhaust a
+workspace's quota with no way to reclaim the space short of deleting the file.
+
+**Quota (v1.3):** a workspace's `storage_used_bytes` is the sum of `size_bytes` across
+all **non-deleted** `file_versions` rows in that workspace — not just current versions.
+This is the only reading consistent with Architecture §6's reconciliation task, which
+recomputes real usage from the workspace's storage prefix; that prefix physically holds
+every retained version. Counting current versions only would make reconciliation report
+drift permanently, turning the safety check into a standing false alarm.
 
 ## 8. `file_permissions`
 
@@ -289,3 +304,23 @@ Found reading v1.1 against what M1 actually has to build:
    endpoint later. M6 now covers the audit *UI* and notifications, not the table.
 6. **`logout` added to the `audit_logs.action` enum** — §10 could record a login but
    not its end, which makes a session timeline impossible to reconstruct.
+
+### v1.3 (8 Sep 2026, start of M2)
+
+Found reading v1.2 against what M2 has to build:
+
+1. **Quota accounting contradicted itself.** `files.size_bytes` is "size of the current
+   version", but Architecture §6's reconciliation recomputes usage from the workspace
+   storage prefix, which holds *every* retained version. Counting current versions only
+   would have made the reconciliation task report drift forever. Quota now explicitly
+   counts all retained versions (§7).
+2. **Version history was unbounded**, so one file re-uploaded repeatedly could consume a
+   whole workspace with no way to reclaim the space. Capped at 10 retained versions per
+   file, oldest pruned on overflow (§7).
+3. **Soft delete had no restore semantics.** `deletion_batch_id` added to `folders`,
+   `files` and `file_versions` so restoring a folder revives exactly what that delete
+   removed — and not items the user had already thrown away on purpose.
+4. **`file_permissions` (§8) had no milestone.** PRD §4 promises Owner/Editor/Viewer
+   *per file or folder* and Architecture §4.1 steps 1-2 depend on it, but M1 was
+   workspace-level only. Built in M2 alongside the folder tree, since the ancestor walk
+   it needs is the same traversal the tree code already performs.

@@ -2,7 +2,7 @@
 
 **Scope note:** system/service design — how components interact, the background job pipeline, security architecture. Not data structure (`Schema.md`) or naming/conventions (`Rules.md`).
 
-**Version:** v1.3 — authentication and workspace permissions specified at the start of M1, 8 September 2026 (see §12). Previously v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
+**Version:** v1.4 — folder tree, per-file permissions and quota accounting specified at the start of M2, 8 September 2026 (see §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
 
 ---
 
@@ -89,6 +89,13 @@ Resolved in strict precedence order — **first match wins**, more specific alwa
 
 Workspace `owner` is not a bypass: it resolves through the same function, it simply loses to nothing.
 
+**Implementation notes added in v1.4**, because step 2 is a tree walk on the hottest path in the system:
+
+- The ancestor chain is resolved with a single recursive CTE, not a query per level. A folder ten deep must not cost ten round trips on every file access.
+- **Nesting is capped at 32 levels.** Unbounded depth means unbounded cost here, and no legitimate structure needs more.
+- **Cycles are impossible by construction**: moving a folder into its own descendant is rejected (409). A cycle would make this walk non-terminating, so the guard protects the permission path, not just tidiness of the tree.
+- A grant is only honoured while its target row is not soft-deleted; a grant on a deleted folder confers nothing.
+
 ### 4.2 Share-link resolution (unauthenticated, or a different user than the owner)
 
 The **primary type** determines the base rule:
@@ -143,9 +150,21 @@ Invitation acceptance is bound to the invited address: a signed-in user whose em
 
 ## 6. Storage Quota Enforcement
 
+**What the counter counts (specified in v1.4):** `storage_used_bytes` is the sum of `size_bytes` over all non-deleted `file_versions` rows in the workspace — **every retained version, not just current ones**. The storage prefix physically holds every version, so this is the only definition under which the reconciliation task below can ever agree with reality. Version history therefore consumes quota, which is why `file_versions` caps retention at 10 per file (Schema.md §7).
+
 - Checked at `upload-init` (before any storage interaction begins) using `workspaces.storage_used_bytes + incoming_size > workspaces.storage_quota_bytes`. The provider's own per-file ceiling (`FILESHARE_MAX_FILE_SIZE_BYTES`, 50MB on the Supabase free plan) is checked at the same point, so an oversized file is rejected cleanly instead of failing partway through a multipart upload.
-- `storage_used_bytes` updated transactionally on upload completion and on file/version deletion, scoped to the file's `workspace_id` — never left to drift. A periodic reconciliation task (Celery beat) recomputes actual storage usage per workspace prefix against the stored counter as a consistency check, following the same "verify the artifact, don't just trust the counter" discipline used throughout prior projects.
-- Soft-deleted files still occupy storage. v1 rule: `storage_used_bytes` is decremented at soft-delete time and the objects are purged by a retention sweep (30 days), so the counter reflects what the user believes they are using.
+- **The check and the reservation happen under a row lock** on the workspace (`SELECT ... FOR UPDATE`). Without it two concurrent uploads both read the old total, both pass, and the workspace ends up over quota — a check that is not atomic with what it guards is not a check.
+- `storage_used_bytes` updated transactionally on upload completion, on version pruning, and on file/version deletion, scoped to the file's `workspace_id` — never left to drift. A periodic reconciliation task (Celery beat) recomputes actual storage usage per workspace prefix against the stored counter as a consistency check, following the same "verify the artifact, don't just trust the counter" discipline used throughout prior projects.
+- Soft-deleted files still occupy storage. v1 rule: `storage_used_bytes` is decremented at soft-delete time and the objects are purged by a retention sweep (30 days), so the counter reflects what the user believes they are using. Reconciliation accounts for this window rather than reporting it as drift.
+
+## 6a. Deletion and Restore
+
+Soft delete exists so `audit_logs.target_id` always resolves (Schema.md §10). v1.4 makes it a user-visible trash as well:
+
+- Every delete operation stamps one `deletion_batch_id` across every row it soft-deletes — the folder, its descendant folders, their files, and those files' versions.
+- **Restore revives exactly one batch.** Restoring a folder does not resurrect items the user had deleted separately beforehand, because those carry a different batch id. Without this rule, restoring a folder would silently undo unrelated earlier decisions.
+- A restore is refused if it would exceed the workspace quota, or if the parent it would return to is itself deleted.
+- The retention sweep purges objects 30 days after `deleted_at`; after that the rows remain (for audit) but the bytes are gone and restore is no longer offered.
 
 ## 7. Deployment Architecture
 
@@ -233,3 +252,12 @@ The CORS gap is the one with architectural consequence: §2 step 4 depends on th
 4. **Invitation acceptance bound to the invited email.** Previously unstated, and the permissive reading — anyone holding the link may accept — is a real privilege-escalation path.
 5. **Invitation tokens moved out of URLs** after M1 manual validation showed raw tokens in the uvicorn access log. Documented in §4.6.
 6. **A deployment constraint follows from the cookie choice** (§4.0): the API and frontend must share a registrable domain, or `SameSite=Lax` will not be sent. Recorded now so M8 does not discover it late.
+
+## 13. Amendment Log — v1.4 (8 Sep 2026, start of M2)
+
+1. **§6 rewritten: quota counts every retained version.** v1.3 left `files.size_bytes` ("current version") and the reconciliation task ("actual usage per workspace prefix") describing two different numbers, which would have made reconciliation report drift permanently. Schema.md §7 carries the matching rule and a 10-version retention cap, without which version history could exhaust a workspace.
+2. **Quota check placed under a row lock.** Previously specified as a check with no concurrency story; two simultaneous uploads would both have passed it.
+3. **§6a added — deletion batches and restore.** Soft delete was defined; restore was not, and the obvious implementation would resurrect files the user had deliberately deleted before the folder that contained them.
+4. **§4.1 given implementation constraints** — recursive CTE rather than per-level queries, a 32-level depth cap, cycle rejection on move, and the rule that a grant on a soft-deleted row confers nothing. The ancestor walk sits on the hottest path in the system and had no cost or termination guarantees.
+5. **Upload-init/upload-complete pulled into M2** (PRD §7 amended). A file cannot exist without its bytes, so leaving upload in M3 would have left M2 unverifiable end to end. M3 becomes the drag-and-drop frontend and upload progress UI.
+6. **`file_permissions` scheduled into M2.** PRD §4 promised per-file/folder roles and §4.1 depends on them, but no milestone owned them; the ancestor walk they require is the same traversal the folder tree code performs.
