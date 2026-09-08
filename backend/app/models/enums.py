@@ -37,6 +37,28 @@ class InvitationStatus(enum.StrEnum):
     EXPIRED = "expired"
 
 
+class ScanStatus(enum.StrEnum):
+    """Malware scan state (Schema.md §6-7).
+
+    The access rule keyed on these values lives in Architecture.md §3: only `clean` and
+    `scan_skipped` may be served. M4 drives the transitions; M2 only sets the value an
+    upload starts with.
+    """
+
+    PENDING = "pending"
+    SCANNING = "scanning"
+    CLEAN = "clean"
+    FLAGGED = "flagged"
+    # File was too large for the scanner to accept, or scanning is not enabled yet.
+    # Served, but with a visible "not scanned" badge — the badge must tell the truth.
+    SCAN_SKIPPED = "scan_skipped"
+    SCAN_FAILED = "scan_failed"
+
+    @property
+    def is_downloadable(self) -> bool:
+        return self in (ScanStatus.CLEAN, ScanStatus.SCAN_SKIPPED)
+
+
 class AuditAction(enum.StrEnum):
     """Schema.md §10. Only the M1 subset is exercised so far; the rest land with their
     milestones. The enum is created in full so later milestones need no migration."""

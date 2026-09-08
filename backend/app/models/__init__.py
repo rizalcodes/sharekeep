@@ -12,10 +12,18 @@ from app.models.base import (
     TimestampMixin,
     UUIDPrimaryKeyMixin,
 )
+from app.models.content import (
+    File,
+    FilePermission,
+    FileVersion,
+    Folder,
+    SoftDeleteBatchMixin,
+)
 from app.models.enums import (
     AuditAction,
     AuditTargetType,
     InvitationStatus,
+    ScanStatus,
     WorkspaceRole,
 )
 from app.models.identity import (
@@ -33,8 +41,14 @@ __all__ = [
     "AuditTargetType",
     "Base",
     "CreatedAtMixin",
+    "File",
+    "FilePermission",
+    "FileVersion",
+    "Folder",
     "InvitationStatus",
     "RefreshToken",
+    "ScanStatus",
+    "SoftDeleteBatchMixin",
     "SoftDeleteMixin",
     "TimestampMixin",
     "UUIDPrimaryKeyMixin",

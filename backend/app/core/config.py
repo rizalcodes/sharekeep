@@ -90,6 +90,10 @@ class Settings(BaseSettings):
     signed_upload_url_ttl_seconds: int = 3600
     multipart_chunk_size_bytes: int = 8 * 1024 * 1024
 
+    # Scanning arrives at M4. Until then uploads are marked scan_skipped rather than
+    # clean, so the UI badge tells the truth instead of claiming a check that never ran.
+    scanning_enabled: bool = False
+
     # --- VirusTotal ---
     virustotal_api_key: SecretStr | None = None
     virustotal_direct_upload_limit_bytes: int = VT_DIRECT_UPLOAD_LIMIT_BYTES

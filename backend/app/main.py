@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import engine
 from app.core.logging import configure_logging
-from app.routers import auth, health, invitations, workspaces
+from app.routers import auth, files, folders, health, invitations, workspaces
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -67,3 +67,5 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(workspaces.router)
 app.include_router(invitations.router)
+app.include_router(folders.router)
+app.include_router(files.router)

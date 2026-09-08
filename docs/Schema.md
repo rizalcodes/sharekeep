@@ -114,6 +114,8 @@ Represents the current/latest state of a file. Version history is in `file_versi
 | `file_id` | UUID | required | → `files.id` |
 | `version_number` | integer | required | Increments per file, starting at 1 |
 | `storage_key` | string | required | Object key: `workspace_id/file_id/version_id/filename` (provider-agnostic; see Architecture §8) |
+| `upload_id` | string | optional | **Added v1.3.** The provider's multipart upload id, held between `upload-init` and `upload-complete` and cleared on completion. Architecture §2 step 3 creates the version row before the bytes exist, so the in-flight upload needs somewhere to live; it is also what the abandoned-upload sweep aborts. |
+| `upload_started_at` | datetime | optional | **Added v1.3.** When the multipart session opened, so the sweep can find sessions older than the TTL. |
 | `size_bytes` | bigint | required | — |
 | `checksum_sha256` | string | optional | SHA-256, computed by the worker on upload finalize. Serves double duty: integrity verification, and the VirusTotal hash lookup (Architecture §3) |
 | `uploaded_by` | UUID | required | → `users.id` |
@@ -317,10 +319,14 @@ Found reading v1.2 against what M2 has to build:
 2. **Version history was unbounded**, so one file re-uploaded repeatedly could consume a
    whole workspace with no way to reclaim the space. Capped at 10 retained versions per
    file, oldest pruned on overflow (§7).
-3. **Soft delete had no restore semantics.** `deletion_batch_id` added to `folders`,
+3. **The upload flow had nowhere to keep its in-flight state.** Architecture §2 creates
+   the `file_versions` row before the bytes exist, but nothing held the provider's
+   multipart upload id, so `upload-complete` could not finalise and the abandoned-upload
+   sweep had nothing to abort. `upload_id` / `upload_started_at` added.
+4. **Soft delete had no restore semantics.** `deletion_batch_id` added to `folders`,
    `files` and `file_versions` so restoring a folder revives exactly what that delete
    removed — and not items the user had already thrown away on purpose.
-4. **`file_permissions` (§8) had no milestone.** PRD §4 promises Owner/Editor/Viewer
+5. **`file_permissions` (§8) had no milestone.** PRD §4 promises Owner/Editor/Viewer
    *per file or folder* and Architecture §4.1 steps 1-2 depend on it, but M1 was
    workspace-level only. Built in M2 alongside the folder tree, since the ancestor walk
    it needs is the same traversal the tree code already performs.

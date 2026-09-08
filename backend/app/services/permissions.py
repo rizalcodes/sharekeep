@@ -13,8 +13,10 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import func, select
+from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.content import FilePermission, Folder
 from app.models.enums import WorkspaceRole
 from app.models.identity import User, Workspace, WorkspaceMember
 
@@ -162,3 +164,159 @@ async def _sync_owner_pointer(db: AsyncSession, workspace: Workspace) -> None:
     if workspace.owner_id not in {owner.user_id for owner in owners}:
         workspace.owner_id = owners[0].user_id
         await db.flush()
+
+
+# --- Object-level resolution (Architecture.md §4.1, added in M2) ------------------
+#
+# Precedence, first match wins, more specific always beats less specific:
+#   1. explicit grant on the file itself
+#   2. explicit grant on the nearest ancestor folder
+#   3. the requester's workspace_members role
+#   4. no membership -> denied
+#
+# Most-permissive-wins is explicitly rejected: it would make a deliberately narrowing
+# grant silently ineffective, which is a security failure mode, not a convenience.
+
+MAX_FOLDER_DEPTH = 32
+
+
+class DepthLimitExceeded(PermissionError_):
+    """Nesting beyond MAX_FOLDER_DEPTH.
+
+    Every object-level permission check walks the ancestor chain, so unbounded depth
+    means unbounded cost on the hottest path in the system.
+    """
+
+
+class CycleError(PermissionError_):
+    """A move that would place a folder inside its own subtree.
+
+    A cycle makes the ancestor walk non-terminating, so this guard protects the
+    permission path itself, not merely the tidiness of the tree.
+    """
+
+
+_ANCESTOR_CTE = sa_text(
+    """
+    WITH RECURSIVE chain AS (
+        SELECT id, parent_folder_id, workspace_id, deleted_at, 0 AS depth
+        FROM folders
+        WHERE id = :folder_id
+        UNION ALL
+        SELECT f.id, f.parent_folder_id, f.workspace_id, f.deleted_at, chain.depth + 1
+        FROM folders f
+        JOIN chain ON f.id = chain.parent_folder_id
+        WHERE chain.depth < :max_depth
+    )
+    SELECT id, depth FROM chain ORDER BY depth
+    """
+)
+
+
+async def ancestor_chain(
+    db: AsyncSession, folder_id: uuid.UUID, *, include_deleted: bool = False
+) -> list[uuid.UUID]:
+    """Folder ids from the folder itself outward to the root, nearest first.
+
+    One recursive CTE, not a query per level: a folder ten deep must not cost ten
+    round trips on every file access.
+    """
+    result = await db.execute(
+        _ANCESTOR_CTE, {"folder_id": folder_id, "max_depth": MAX_FOLDER_DEPTH}
+    )
+    rows = result.all()
+    if not include_deleted:
+        return [row.id for row in rows]
+    return [row.id for row in rows]
+
+
+async def resolve_object_role(
+    db: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    user: User,
+    file_id: uuid.UUID | None = None,
+    folder_id: uuid.UUID | None = None,
+) -> WorkspaceRole | None:
+    """The single object-level resolution path. Returns None when access is denied.
+
+    `folder_id` is the file's containing folder when resolving a file, or the folder
+    itself when resolving a folder.
+    """
+    membership = await get_membership(db, workspace_id, user.id)
+
+    # 1. Explicit grant on the file itself.
+    if file_id is not None:
+        result = await db.execute(
+            select(FilePermission.role).where(
+                FilePermission.file_id == file_id,
+                FilePermission.user_id == user.id,
+            )
+        )
+        direct = result.scalar_one_or_none()
+        if direct is not None:
+            return direct
+
+    # 2. Explicit grant on the nearest ancestor folder. A grant on a soft-deleted
+    #    folder confers nothing.
+    if folder_id is not None:
+        chain = await ancestor_chain(db, folder_id)
+        if chain:
+            result = await db.execute(
+                select(FilePermission.folder_id, FilePermission.role)
+                .join(Folder, Folder.id == FilePermission.folder_id)
+                .where(
+                    FilePermission.folder_id.in_(chain),
+                    FilePermission.user_id == user.id,
+                    Folder.deleted_at.is_(None),
+                )
+            )
+            grants = {row.folder_id: row.role for row in result.all()}
+            if grants:
+                # Nearest ancestor wins, including when it is LESS permissive.
+                for candidate in chain:
+                    if candidate in grants:
+                        return grants[candidate]
+
+    # 3. Workspace-level default.
+    if membership is not None:
+        return membership.role
+
+    # 4. Not a member and no explicit grant.
+    return None
+
+
+async def require_object_role(
+    db: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    user: User,
+    required: WorkspaceRole,
+    file_id: uuid.UUID | None = None,
+    folder_id: uuid.UUID | None = None,
+) -> WorkspaceRole:
+    role = await resolve_object_role(
+        db, workspace_id=workspace_id, user=user, file_id=file_id, folder_id=folder_id
+    )
+    if role is None:
+        raise NotAMember("Not found.")
+    if not role.can_act_as(required):
+        raise InsufficientRole(required, role)
+    return role
+
+
+async def assert_move_is_acyclic(
+    db: AsyncSession, folder_id: uuid.UUID, new_parent_id: uuid.UUID | None
+) -> None:
+    """Refuse a move that would put a folder inside its own subtree."""
+    if new_parent_id is None:
+        return
+    if new_parent_id == folder_id:
+        raise CycleError("A folder cannot be moved into itself.")
+    chain = await ancestor_chain(db, new_parent_id)
+    if folder_id in chain:
+        raise CycleError("A folder cannot be moved into one of its own descendants.")
+    if len(chain) >= MAX_FOLDER_DEPTH:
+        raise DepthLimitExceeded(
+            f"Folders may not nest deeper than {MAX_FOLDER_DEPTH} levels."
+        )

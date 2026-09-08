@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 
 PROVIDER = "supabase-storage"
 
+# S3 protocol rule: every part but the last must be at least 5MB. Not a preference.
+MIN_PART_SIZE_BYTES = 5 * 1024 * 1024
+
 _UNSAFE_KEY_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -170,3 +173,97 @@ def check_connectivity() -> dict[str, Any]:
         "bucket": settings.supabase_storage_bucket,
         "region": settings.supabase_region,
     }
+
+
+# --- Multipart upload (Architecture.md §2, added in M2) ---------------------------
+#
+# The client uploads parts straight to storage with presigned URLs; the backend never
+# sees the bytes (Rules.md §3). Verified working against the live bucket during M0.
+
+def create_multipart_upload(storage_key: str, content_type: str) -> str:
+    """Open a multipart session and return the provider's upload id."""
+    try:
+        response = get_storage_client().create_multipart_upload(
+            Bucket=settings.supabase_storage_bucket,
+            Key=storage_key,
+            ContentType=content_type,
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise StorageError("failed to start upload") from exc
+    return response["UploadId"]
+
+
+def plan_parts(size_bytes: int) -> list[tuple[int, int]]:
+    """Split a file into (part_number, part_size).
+
+    Every part except the last must be at least 5MB — an S3 protocol rule, and the
+    reason the chunk size is not simply a UI preference.
+    """
+    chunk = max(settings.multipart_chunk_size_bytes, MIN_PART_SIZE_BYTES)
+    if size_bytes <= 0:
+        return [(1, 0)]
+    parts: list[tuple[int, int]] = []
+    remaining = size_bytes
+    number = 1
+    while remaining > 0:
+        this_part = min(chunk, remaining)
+        parts.append((number, this_part))
+        remaining -= this_part
+        number += 1
+    return parts
+
+
+def presign_part(storage_key: str, upload_id: str, part_number: int) -> str:
+    try:
+        return get_storage_client().generate_presigned_url(
+            "upload_part",
+            Params={
+                "Bucket": settings.supabase_storage_bucket,
+                "Key": storage_key,
+                "UploadId": upload_id,
+                "PartNumber": part_number,
+            },
+            ExpiresIn=settings.signed_upload_url_ttl_seconds,
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise StorageError("failed to sign upload part") from exc
+
+
+def complete_multipart_upload(
+    storage_key: str, upload_id: str, parts: list[dict[str, Any]]
+) -> None:
+    """Finalise the upload. `parts` is [{"PartNumber": n, "ETag": "..."}]."""
+    try:
+        get_storage_client().complete_multipart_upload(
+            Bucket=settings.supabase_storage_bucket,
+            Key=storage_key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": sorted(parts, key=lambda p: p["PartNumber"])},
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise StorageError("failed to finalise upload") from exc
+
+
+def abort_multipart_upload(storage_key: str, upload_id: str) -> None:
+    """Abort an abandoned session.
+
+    Supabase Storage has no lifecycle rules, so the Celery sweep calling this is the
+    ONLY thing preventing orphaned parts from accumulating (Architecture.md §2).
+    """
+    try:
+        get_storage_client().abort_multipart_upload(
+            Bucket=settings.supabase_storage_bucket,
+            Key=storage_key,
+            UploadId=upload_id,
+        )
+    except (BotoCoreError, ClientError) as exc:
+        logger.warning("failed to abort upload for %s: %s", storage_key, type(exc).__name__)
+
+
+def delete_object(storage_key: str) -> None:
+    try:
+        get_storage_client().delete_object(
+            Bucket=settings.supabase_storage_bucket, Key=storage_key
+        )
+    except (BotoCoreError, ClientError) as exc:
+        logger.warning("failed to delete %s: %s", storage_key, type(exc).__name__)

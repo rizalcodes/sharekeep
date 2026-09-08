@@ -7,8 +7,8 @@ has actually been performed, not when the code merely exists (Rules.md §6).
 |---|---|---|
 | M0 | Project scaffold: FastAPI backend, Next.js frontend, Docker Compose, Celery+Redis wired, storage bucket configured | **Done** (7 Sep 2026) |
 | M1 | Auth + workspace + RBAC (Owner/Editor/Viewer), workspace invitations | **Done** (8 Sep 2026) |
-| M2 | File/folder CRUD, nested folders, storage quota enforcement | Not started |
-| M3 | Upload pipeline: drag & drop + chunked multipart upload to object storage | Not started |
+| M2 | File/folder CRUD, nested folders, per-object permissions, chunked upload API, quota | **Done** (8 Sep 2026) |
+| M3 | Upload UX: drag & drop, per-chunk progress, retry/resume (frontend) | Not started |
 | M4 | Malware scanning (Celery + VirusTotal) + file versioning | Not started |
 | M5 | Sharing: 4 link types, password protection, expiry, modifiers | Not started |
 | M6 | Audit log + email notifications (Resend) | Not started |
@@ -267,3 +267,86 @@ Adversarial cases (Rules.md §6), all passing in both pytest and manual HTTP:
   hardening at M7/M8.
 - **Deployment constraint** (Architecture §4.0): the API and frontend must share a
   registrable domain, or the Lax cookie will not be sent. Applies at M8.
+
+
+---
+
+## M2 — Files, folders, permissions, quota
+
+Branch `feature/m2-files-folders`.
+
+### Docs amended first
+
+Schema v1.3 and Architecture v1.4. Four findings, plus two scope moves agreed with
+Rizal: upload-init/complete pulled from M3 into M2 (a file cannot exist without its
+bytes, so M2 would have been unverifiable end to end), and `file_permissions` scheduled
+into M2 (PRD §4 promised per-file roles, Architecture §4.1 depended on them, no
+milestone owned them).
+
+### Delivered
+
+- **4 tables**: folders, files, file_versions, file_permissions.
+- **Folder tree**: nested create/rename/move/delete, breadcrumbs, cycle rejection,
+  32-level depth cap, `NULLS NOT DISTINCT` uniqueness so two root folders cannot share
+  a name.
+- **Object-level permissions (§4.1)** resolved by one recursive CTE: file grant →
+  nearest ancestor folder grant → workspace role. Nearest wins **even when less
+  permissive**.
+- **Chunked upload** (§2): `uploads/init` returns presigned per-part URLs, client
+  PUTs straight to storage, `uploads/complete` finalises. The API never sees bytes.
+- **Quota** counting every retained version, reserved under a row lock, with a
+  10-version retention cap and automatic pruning.
+- **Trash and restore** via `deletion_batch_id`.
+- **Celery**: `reconcile_storage_usage` and `sweep_abandoned_multipart_uploads` are
+  now real. The sweep matters more here than on AWS — Supabase has no lifecycle rules,
+  so it is the only thing preventing orphaned multipart parts.
+
+### Verification
+
+138 automated tests, lint clean, plus 33 manual checks against the running stack
+**with real bytes through Supabase** (the suite stubs storage; this did not).
+
+| Check | Result |
+|---|---|
+| Automated suite | 138 passed |
+| Lint | clean |
+| Migration/model parity | zero drift |
+| Migration downgrade → upgrade round trip | clean |
+| Partial indexes + `NULLS NOT DISTINCT` | present in Postgres, verified by query |
+| Real 7MB multipart upload → download | SHA-256 round trip intact |
+| Quota after two versions | counts both, exactly |
+| Reconcile across 28 workspaces | zero drift found |
+| Celery tasks via worker | both return real results |
+| Audit rows | upload, download, folder_created/deleted, version_restored |
+
+Adversarial cases: outsider blocked on file read/download/delete (404, not 403);
+folder cycle refused and tree still traversable afterwards; unsigned storage URL
+refused (403); oversized upload refused before any storage call; upload-complete
+replay refused without double-counting quota; grant on a deleted folder confers
+nothing; grants do not leak across workspaces; a narrowing grant beats a higher
+workspace role; restore does not resurrect separately-deleted items.
+
+### Defects found by running it
+
+1. **Autogenerate silently dropped a foreign key.** `files.current_version_id →
+   file_versions.id` was emitted inline with `use_alter=True`, which Alembic discards
+   inside `create_table`; `files` is created first, so the FK simply never existed.
+   Only the migration/model parity check caught it. Fixed with an explicit ALTER after
+   both tables exist, and an idempotent drop in `downgrade`.
+2. **Autogenerate would have aborted the migration mid-way** by trying to `CREATE TYPE`
+   an enum that already existed (`workspace_role` from M1) and creating `scan_status`
+   twice.
+3. **Constraint names were doubled** (`ck_folders_ck_folders_no_self_parent`) because
+   the naming convention already prefixes them.
+4. A manual check asserted the wrong status code (expected 400 for an unsigned URL;
+   the correct answer is 403). My assertion was wrong, not the product.
+
+### Open at the end of M2
+
+- **Frontend untouched.** M3 is the drag-and-drop UI and progress.
+- **Scan status is `scan_skipped` on every upload** until M4 wires VirusTotal. This is
+  deliberate: marking unscanned files `clean` would make the trust badge lie.
+- **Retention sweep not built** — soft-deleted objects are not yet purged after 30
+  days. Belongs with M4's Celery work.
+- **`mime_type` is client-supplied** and stored as metadata only; never used for a
+  security decision.

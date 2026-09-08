@@ -140,3 +140,70 @@ async def new_user(make_client_factory, email: str, **kwargs) -> tuple[httpx.Asy
     response = await signup(client, email, **kwargs)
     assert response.status_code == 201, response.text
     return client, response.json()
+
+
+@pytest.fixture(autouse=True)
+def stub_storage(monkeypatch):
+    """Keep the suite off real object storage.
+
+    Every test here is about our own logic — quota arithmetic, permission resolution,
+    version pruning — not about whether Supabase works. That was proven end to end
+    with real bytes during M0, and is re-proven in M2 manual validation.
+    """
+    uploads: dict[str, list] = {}
+
+    def create_multipart_upload(storage_key, content_type):
+        upload_id = f"upload-{len(uploads) + 1}"
+        uploads[upload_id] = []
+        return upload_id
+
+    def presign_part(storage_key, upload_id, part_number):
+        return f"https://storage.test/{storage_key}?partNumber={part_number}"
+
+    def complete_multipart_upload(storage_key, upload_id, parts):
+        uploads.pop(upload_id, None)
+
+    def abort_multipart_upload(storage_key, upload_id):
+        uploads.pop(upload_id, None)
+
+    from app.services import storage as storage_module
+
+    monkeypatch.setattr(storage_module, "create_multipart_upload", create_multipart_upload)
+    monkeypatch.setattr(storage_module, "presign_part", presign_part)
+    monkeypatch.setattr(storage_module, "complete_multipart_upload", complete_multipart_upload)
+    monkeypatch.setattr(storage_module, "abort_multipart_upload", abort_multipart_upload)
+    monkeypatch.setattr(storage_module, "delete_object", lambda key: None)
+    monkeypatch.setattr(
+        storage_module,
+        "generate_download_url",
+        lambda key, download_filename=None: f"https://storage.test/{key}?signed=1",
+    )
+    return uploads
+
+
+async def upload_file(
+    client: httpx.AsyncClient,
+    workspace_id,
+    name: str,
+    *,
+    size_bytes: int = 1024,
+    folder_id=None,
+    mime_type: str = "text/plain",
+):
+    """Drive a full upload through the real endpoints, with storage stubbed."""
+    base = f"/api/v1/workspaces/{workspace_id}"
+    body = {"name": name, "size_bytes": size_bytes, "mime_type": mime_type}
+    if folder_id is not None:
+        body["folder_id"] = str(folder_id)
+    init = await client.post(f"{base}/uploads/init", json=body)
+    if init.status_code != 201:
+        return init
+    payload = init.json()
+    parts = [
+        {"part_number": p["part_number"], "etag": f'"etag-{p["part_number"]}"'}
+        for p in payload["parts"]
+    ]
+    return await client.post(
+        f"{base}/uploads/complete",
+        json={"version_id": payload["version_id"], "parts": parts},
+    )
