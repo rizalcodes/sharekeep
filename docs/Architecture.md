@@ -2,7 +2,7 @@
 
 **Scope note:** system/service design — how components interact, the background job pipeline, security architecture. Not data structure (`Schema.md`) or naming/conventions (`Rules.md`).
 
-**Version:** v1.2 — storage provider changed to Supabase Storage, 7 September 2026 (see §11). Previously v1.1, amended at kickoff before M0 (see §10).
+**Version:** v1.3 — authentication and workspace permissions specified at the start of M1, 8 September 2026 (see §12). Previously v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
 
 ---
 
@@ -64,6 +64,20 @@
 
 **Every file access request (direct API, or via a share link) goes through the same permission-resolution function.** One code path, so there is exactly one place to audit and one place to test adversarially.
 
+### 4.0 Authentication and session handling
+
+Specified in v1.3 — v1.2 committed only to "JWTs in httpOnly, Secure, SameSite cookies" (§9) and left everything else open.
+
+- **Passwords:** Argon2id. Minimum 12 characters, maximum 128 — the upper bound matters, since an unbounded input to a memory-hard hash is a denial-of-service vector. No composition rules (NIST-aligned).
+- **Access token:** short-lived JWT (15 min), carried in an httpOnly cookie. Stateless; never consulted against the database.
+- **Refresh token:** opaque random string, 14 days, stored **hashed** in `refresh_tokens` (Schema.md §12). Rotated on every use — the presented token is revoked and points at its replacement.
+- **Reuse detection:** presenting an already-rotated refresh token means the token was captured and replayed. Response is to revoke that user's entire chain, not just the presented row, and force re-authentication.
+- **Logout** revokes the refresh row, so it genuinely ends the session rather than clearing a cookie while the token stays valid.
+- **`SameSite=Lax`**, not `Strict`: a `Strict` cookie is withheld on the cross-site navigation that clicking an emailed invitation link produces, which would break invitation acceptance. Lax blocks cross-site POST, which is the CSRF case that matters.
+- **Deployment constraint this creates:** a Lax cookie is only sent when the API and frontend share a registrable domain. `app.example.com` + `api.example.com` works; two unrelated domains would force `SameSite=None` and reopen CSRF. M8 must deploy them as one site.
+- **Login throttling:** per-IP and per-email, in Redis. §4.4 requires this for share links; the same reasoning applies to a password endpoint, and `login_failed` already exists in the audit enum.
+- **Enumeration:** login failures are indistinguishable whether the email exists or not, and signup does not reveal whether an address is already registered through a differing response.
+
 ### 4.1 Effective role resolution (authenticated user)
 
 Resolved in strict precedence order — **first match wins**, more specific always beats less specific:
@@ -98,6 +112,28 @@ Share-link token endpoints are rate-limited per IP — an unguessable token is o
 ### 4.5 Audit
 
 Every resolution attempt — success **and** failure — is written to `audit_logs` with `share_accessed` or `share_access_denied`, capturing `ip_address`, `user_agent`, and the denial reason in `metadata`.
+
+### 4.6 Workspace management permissions
+
+§4.1 resolves access to *files*. It says nothing about who may administer a workspace, which M1 needs. Specified in v1.3:
+
+| Action | owner | editor | viewer |
+|---|---|---|---|
+| View workspace, list members | yes | yes | yes |
+| Create/modify files and folders (M2+) | yes | yes | no |
+| Invite, revoke invitations, remove members | yes | no | no |
+| Change a member's role | yes | no | no |
+| Rename workspace, change quota | yes | no | no |
+| Delete workspace | yes | no | no |
+
+Two invariants, both enforced server-side and both tested adversarially:
+
+1. **A workspace always has at least one owner.** The last owner cannot be demoted, removed, or allowed to leave. Otherwise the workspace is orphaned and nobody can ever administer it again.
+2. **A personal workspace cannot be deleted** while its user exists (Schema.md §2), and its owner cannot be removed. It may still have other members invited into it — `is_personal` governs deletion, not collaboration.
+
+**Invitation tokens never travel in a URL.** The preview endpoint is `POST /invitations/preview` with the token in the body, not `GET /invitations/{token}` — a web server writes full request paths into its access log verbatim, and an invitation token sitting in a log is workspace access for anyone who can read that log. Found during M1 manual validation by inspecting real container logs; the log redaction filter covers the same shape as a second layer.
+
+Invitation acceptance is bound to the invited address: a signed-in user whose email differs from the invitation's is **rejected**, never silently accepted. An invitation is a grant to one address, not a bearer token for whoever opens the link.
 
 ## 5. Notification Pipeline
 
@@ -188,3 +224,12 @@ The CORS gap is the one with architectural consequence: §2 step 4 depends on th
 8. **`storage_keepalive` beat task added** — free-tier projects pause after 7 days of inactivity.
 
 **Consequence for §3 worth noting:** with a 50MB per-file ceiling, `scan_skipped` is unreachable — every file sits far below VirusTotal's 650MB limit. The state and its code path are retained deliberately, since both become correct again the moment the project returns to AWS S3.
+
+## 12. Amendment Log — v1.3 (8 Sep 2026, start of M1)
+
+1. **§4.0 added.** v1.2 specified authentication in a single line. Session lifetime, refresh rotation, reuse detection, logout semantics, SameSite choice, login throttling and enumeration resistance were all undefined at the point M1 had to implement them.
+2. **§4.6 added.** §4.1 defined file access resolution but nothing defined who may administer a workspace — invite, change roles, delete. M1 could not be built without it.
+3. **The last-owner and personal-workspace invariants written down.** Both were implied by Schema.md §2 but never stated as rules with a defined failure mode.
+4. **Invitation acceptance bound to the invited email.** Previously unstated, and the permissive reading — anyone holding the link may accept — is a real privilege-escalation path.
+5. **Invitation tokens moved out of URLs** after M1 manual validation showed raw tokens in the uvicorn access log. Documented in §4.6.
+6. **A deployment constraint follows from the cookie choice** (§4.0): the API and frontend must share a registrable domain, or `SameSite=Lax` will not be sent. Recorded now so M8 does not discover it late.

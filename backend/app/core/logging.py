@@ -30,6 +30,13 @@ _REDACTION_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         r"\1\2[REDACTED]",
     ),
+    # Secret-bearing URL paths. The preview endpoint no longer puts an invitation
+    # token in the URL, but access logs record whatever path arrives — so a stray
+    # link, a redirect, or a future endpoint must not be able to reintroduce this.
+    (
+        re.compile(r"(?i)(/(?:invitations|invite|share|reset)/)[A-Za-z0-9_\-]{20,}"),
+        r"\g<1>[REDACTED_TOKEN]",
+    ),
     # Postgres/Redis connection strings with inline credentials
     (re.compile(r"(?i)\b([a-z+]+://)([^:/\s]+):([^@/\s]+)@"), r"\1\2:[REDACTED]@"),
 ]

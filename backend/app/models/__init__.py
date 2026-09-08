@@ -12,11 +12,35 @@ from app.models.base import (
     TimestampMixin,
     UUIDPrimaryKeyMixin,
 )
+from app.models.enums import (
+    AuditAction,
+    AuditTargetType,
+    InvitationStatus,
+    WorkspaceRole,
+)
+from app.models.identity import (
+    AuditLog,
+    RefreshToken,
+    User,
+    Workspace,
+    WorkspaceInvitation,
+    WorkspaceMember,
+)
 
 __all__ = [
+    "AuditAction",
+    "AuditLog",
+    "AuditTargetType",
     "Base",
     "CreatedAtMixin",
+    "InvitationStatus",
+    "RefreshToken",
     "SoftDeleteMixin",
     "TimestampMixin",
     "UUIDPrimaryKeyMixin",
+    "User",
+    "Workspace",
+    "WorkspaceInvitation",
+    "WorkspaceMember",
+    "WorkspaceRole",
 ]

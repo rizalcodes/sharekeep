@@ -129,6 +129,17 @@ def test_secrets_never_survive_redaction(raw: str) -> None:
         assert secret not in cleaned, f"{secret!r} leaked through redaction: {cleaned}"
 
 
+def test_secret_bearing_url_paths_are_redacted() -> None:
+    """Found during M1 manual validation: raw invitation tokens were reaching the
+    uvicorn access log via the URL path, which is workspace access for anyone who can
+    read the log. The endpoint no longer does this; the filter is the second layer."""
+    token = "3GzJuk9_WcrOp3Wxfb7rgaj7gOMoWYZ7ouyb7PsZ3mrXCeISwcLxAGI9oV-DHaQw"
+    line = f'GET /api/v1/invitations/{token} HTTP/1.1 200'
+    cleaned = redact(line)
+    assert token not in cleaned
+    assert "[REDACTED_TOKEN]" in cleaned
+
+
 def test_redaction_leaves_ordinary_messages_alone() -> None:
     message = "uploaded version 3 of report.pdf to workspace 4f9a"
     assert redact(message) == message
