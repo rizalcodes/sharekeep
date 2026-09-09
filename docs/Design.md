@@ -33,6 +33,10 @@ Given the security-first positioning, a cooler, more neutral palette than the wa
 - **Permission indicator:** clear visual distinction between Owner/Editor/Viewer access on shared items, and whether an item is shared at all.
 - **Share link modal:** clearly distinguishes the 4 link types at creation time, with plain-language explanation of each (not just technical labels) — mirrors the "explain like the user has never seen this" discipline used in the n8n project's buyer docs.
 - **Upload progress:** chunked upload progress must be visibly real (per-chunk or percentage-accurate), not a fake/indeterminate spinner, given large-file support is a core feature.
+- **Upload queue (added at M3):** each queued file shows its own row with real per-chunk percentage, and a per-file terminal state. Failures are separated by kind, because the two demand different things from the user: a transient network failure retries itself and says so, while a permanent refusal (over quota, file above the provider ceiling, permission revoked, part rejected) stops immediately and states the reason. An upload that will never succeed must never present as one still trying.
+- **Quota is checked before the first byte moves (added at M3):** the remaining workspace quota and the provider's per-file ceiling are both evaluated the moment a file is chosen, and a file that cannot fit is marked in the queue with the specific reason. Discovering this three chunks in is a worse experience than not starting.
+- **Interrupted uploads (added at M3):** an unfinished upload is surfaced on return with its real progress and an explicit invitation to re-select the same file. It is never presented as resuming by itself — the browser cannot do that, and implying otherwise would be a lie in the interface.
+- **Authentication surfaces (added at M3):** sign in, sign up, and workspace selection. Deliberately plain — a security product's login screen should look unremarkable and legible, not designed. Full visual pass is M7.
 
 ## 6. Motion
 

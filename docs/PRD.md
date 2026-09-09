@@ -139,6 +139,15 @@ The S3-compatible endpoint supports the full multipart set (`CreateMultipartUplo
 - **The abandoned-multipart sweep became load-bearing.** On S3 a bucket lifecycle rule caught orphaned parts as a second line of defense. Supabase has no lifecycle rules, so the Celery sweep is now the only protection. Raised in priority for M3.
 - **Two databases now.** Supabase keeps object metadata in its own Postgres (`storage.buckets`, `storage.objects`); application data stays in our own Postgres container. Supabase is used for Storage only — not Auth, not application data.
 
+## 10a. M3 Scope Additions (9 Sep 2026, start of M3)
+
+Two additions, both because M3 could not otherwise be *validated*, which is the standard every milestone has been held to:
+
+- **Minimal authentication UI** (sign in, sign up, workspace selection). Every M1/M2 endpoint requires a session cookie; without login the upload UI could be neither used nor manually verified. Visual polish remains M7.
+- **Two backend endpoints for resume** (`GET /uploads`, `GET /uploads/{version_id}/parts`). M3 was scoped as purely frontend, but resume needs the server to say which parts already landed. `ListParts` support was verified against the live bucket first.
+
+Two things deliberately **not** in M3: folder drag-and-drop, which needs recursive directory traversal and server-side structure creation, and the table/grid toggle from Design.md §5. Both move to M7 so M3 stays focused on progress, retry and resume.
+
 ## 11. Next Steps
 
 1. ~~Draft `Schema.md`, `Rules.md`, `Architecture.md`, and `Design.md`.~~ Done.

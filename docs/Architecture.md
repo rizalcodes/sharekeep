@@ -2,7 +2,7 @@
 
 **Scope note:** system/service design — how components interact, the background job pipeline, security architecture. Not data structure (`Schema.md`) or naming/conventions (`Rules.md`).
 
-**Version:** v1.4 — folder tree, per-file permissions and quota accounting specified at the start of M2, 8 September 2026 (see §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
+**Version:** v1.5 — resumable upload specified at the start of M3, 9 September 2026 (see §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
 
 ---
 
@@ -26,6 +26,17 @@
 5. Client notifies backend on completion: `POST /files/upload-complete`, returning the part number/ETag list.
 6. Backend finalizes the multipart upload, sets `file_versions.scan_status = pending`, enqueues a Celery scan task, updates the target workspace's `storage_used_bytes` transactionally.
 7. File is visible in the UI but marked "scanning" until the Celery task completes.
+
+### 2a. Resuming an interrupted upload (specified in v1.5, M3)
+
+A browser refresh or a closed tab destroys the client's record of which parts landed. The provider can answer that question — `ListParts` and `ListMultipartUploads` are both supported on Supabase's S3 endpoint, verified against the live bucket on 9 Sep 2026 — but nothing exposed it, so two endpoints are added:
+
+- `GET /workspaces/{id}/uploads` — in-flight sessions for the workspace: file name, total size, bytes already stored, when it started.
+- `GET /workspaces/{id}/uploads/{version_id}/parts` — which part numbers already landed, plus freshly presigned URLs for the ones that did not. Presigned URLs are short-lived by design, so a resume always re-signs rather than reusing stale ones.
+
+**The limit that cannot be engineered away:** a browser cannot re-read a local file after a reload without the user selecting it again — the `File` object dies with the page. So resume is *"this upload is 62% done; choose the same file to continue"*, and the client verifies the re-chosen file matches on name and exact byte size before continuing. Claiming automatic resume would be claiming something no browser permits.
+
+Both endpoints resolve access through the same permission path as everything else, and an in-flight session belonging to another workspace is invisible rather than forbidden.
 
 **Abandoned uploads:** a multipart upload that is initiated but never completed leaves orphan parts and a `file_versions` row with no object behind it. A Celery beat task sweeps both — aborting multipart uploads older than 24h and reaping the corresponding pending rows. On AWS S3 a bucket lifecycle rule would catch these as a second line of defense; **Supabase Storage has no lifecycle rules, so this sweep is the only protection** and must be implemented properly at M3.
 
@@ -261,3 +272,9 @@ The CORS gap is the one with architectural consequence: §2 step 4 depends on th
 4. **§4.1 given implementation constraints** — recursive CTE rather than per-level queries, a 32-level depth cap, cycle rejection on move, and the rule that a grant on a soft-deleted row confers nothing. The ancestor walk sits on the hottest path in the system and had no cost or termination guarantees.
 5. **Upload-init/upload-complete pulled into M2** (PRD §7 amended). A file cannot exist without its bytes, so leaving upload in M3 would have left M2 unverifiable end to end. M3 becomes the drag-and-drop frontend and upload progress UI.
 6. **`file_permissions` scheduled into M2.** PRD §4 promised per-file/folder roles and §4.1 depends on them, but no milestone owned them; the ancestor walk they require is the same traversal the folder tree code performs.
+
+## 14. Amendment Log — v1.5 (9 Sep 2026, start of M3)
+
+1. **§2a added — resumable upload.** The upload flow described how to start and finish an upload but not how to recover one interrupted half way, and no endpoint exposed which parts had landed. `ListParts` support was verified empirically against the live bucket before designing on it, rather than assumed.
+2. **The browser limitation is recorded rather than papered over.** Resume requires the user to re-select the file; a `File` object cannot survive a page reload. The design says so plainly so nobody later reads "resume" as automatic.
+3. **Minimal authentication UI pulled into M3.** Every M1/M2 endpoint requires a session cookie, so without login pages the upload UI could be neither used nor manually validated — the standard every prior milestone has been held to. Visual polish stays in M7.
