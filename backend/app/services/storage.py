@@ -267,3 +267,29 @@ def delete_object(storage_key: str) -> None:
         )
     except (BotoCoreError, ClientError) as exc:
         logger.warning("failed to delete %s: %s", storage_key, type(exc).__name__)
+
+
+def list_parts(storage_key: str, upload_id: str) -> list[dict[str, Any]]:
+    """Which parts already landed, with their ETags.
+
+    This is what makes resume possible after a page reload: the client's record of
+    completed parts dies with the page, but the provider still has it.
+
+    **Only part numbers and ETags are returned.** Supabase's ListParts omits the `Size`
+    field that AWS includes — verified against the live bucket, after an earlier version
+    of this function assumed AWS's shape and raised KeyError on the first real call.
+    Part sizes come from our own upload plan instead, which is the authoritative source
+    for them anyway.
+    """
+    try:
+        response = get_storage_client().list_parts(
+            Bucket=settings.supabase_storage_bucket,
+            Key=storage_key,
+            UploadId=upload_id,
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise StorageError("failed to list uploaded parts") from exc
+    return [
+        {"part_number": p["PartNumber"], "etag": p["ETag"]}
+        for p in response.get("Parts", [])
+    ]

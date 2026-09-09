@@ -335,3 +335,81 @@ async def download_url(db: AsyncSession, file: File) -> str:
     if version is None or version.deleted_at is not None:
         raise FileError("This file has no completed upload yet.")
     return storage.generate_download_url(version.storage_key, download_filename=file.name)
+
+
+async def list_in_flight(
+    db: AsyncSession, workspace_id: uuid.UUID
+) -> list[tuple[FileVersion, File, int, int]]:
+    """Uploads started but never completed, with real progress from the provider.
+
+    Architecture.md §2a. Progress is read from storage rather than remembered locally,
+    because the client's record of it died with the page that started the upload.
+    """
+    result = await db.execute(
+        select(FileVersion, File)
+        .join(File, File.id == FileVersion.file_id)
+        .where(
+            File.workspace_id == workspace_id,
+            FileVersion.upload_id.is_not(None),
+            FileVersion.deleted_at.is_(None),
+        )
+        .order_by(FileVersion.upload_started_at.desc())
+    )
+    rows = []
+    for version, file in result.all():
+        try:
+            parts = storage.list_parts(version.storage_key, version.upload_id)
+        except storage.StorageError:
+            # A session the provider no longer knows about is not resumable, but it
+            # should not take the whole listing down with it.
+            parts = []
+        # Sizes come from our own plan: the provider reports which parts exist, not
+        # how large they are.
+        sizes = dict(storage.plan_parts(version.size_bytes))
+        uploaded = sum(sizes.get(p["part_number"], 0) for p in parts)
+        rows.append((version, file, uploaded, len(parts)))
+    return rows
+
+
+async def resume_state(
+    db: AsyncSession, *, workspace: Workspace, version: FileVersion, file: File
+) -> dict:
+    """Completed parts plus freshly signed URLs for what is left."""
+    if version.upload_id is None:
+        raise UploadStateError("That upload has already been completed or aborted.")
+
+    landed = storage.list_parts(version.storage_key, version.upload_id)
+    done = {p["part_number"]: p["etag"] for p in landed}
+
+    plan = storage.plan_parts(version.size_bytes)
+
+    # Authoritative byte offsets for every part, so the client never has to infer them.
+    layout = []
+    offset = 0
+    for number, size in plan:
+        layout.append({"part_number": number, "offset": offset, "size_bytes": size})
+        offset += size
+
+    remaining = [
+        {
+            "part_number": number,
+            "size_bytes": size,
+            # Always re-sign: presigned URLs are short-lived by design, and reusing a
+            # stale one fails in a way that looks like a server fault.
+            "url": storage.presign_part(version.storage_key, version.upload_id, number),
+        }
+        for number, size in plan
+        if number not in done
+    ]
+    return {
+        "version_id": version.id,
+        "file_id": file.id,
+        "file_name": file.name,
+        "total_bytes": version.size_bytes,
+        "completed_parts": [
+            {"part_number": n, "etag": e} for n, e in sorted(done.items())
+        ],
+        "remaining_parts": remaining,
+        "layout": layout,
+        "uploaded_bytes": sum(dict(plan).get(n, 0) for n in done),
+    }

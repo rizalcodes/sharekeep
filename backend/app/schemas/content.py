@@ -196,3 +196,50 @@ class GrantOut(BaseModel):
 
 
 FolderListing.model_rebuild()
+
+
+class InFlightUpload(BaseModel):
+    """An upload that was started but never completed (Architecture.md §2a)."""
+
+    version_id: uuid.UUID
+    file_id: uuid.UUID
+    file_name: str
+    folder_id: uuid.UUID | None
+    total_bytes: int
+    uploaded_bytes: int
+    parts_completed: int
+    parts_total: int
+    started_at: datetime
+    version_number: int
+
+
+class PartLayout(BaseModel):
+    """Where one part sits in the source file."""
+
+    part_number: int
+    offset: int
+    size_bytes: int
+
+
+class ResumeState(BaseModel):
+    """What the client needs to pick an interrupted upload back up.
+
+    `completed_parts` are already stored and must be replayed verbatim into
+    upload-complete; `remaining_parts` carry freshly signed URLs, because presigned
+    URLs are deliberately short-lived and a stale one would fail confusingly.
+
+    `layout` gives the byte offset and size of EVERY part, completed or not. The client
+    must not infer offsets from the remaining parts alone: if only the final (short)
+    part is outstanding, an inferred chunk size is wrong and the upload would write the
+    wrong byte range - corrupting the file silently, which is the worst failure a file
+    platform can have.
+    """
+
+    version_id: uuid.UUID
+    file_id: uuid.UUID
+    file_name: str
+    total_bytes: int
+    completed_parts: list[CompletedPart]
+    remaining_parts: list[UploadPart]
+    layout: list[PartLayout]
+    uploaded_bytes: int

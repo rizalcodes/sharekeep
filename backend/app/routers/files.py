@@ -23,8 +23,10 @@ from app.schemas.content import (
     FileUpdate,
     GrantCreate,
     GrantOut,
+    InFlightUpload,
     QuotaOut,
     RestoreRequest,
+    ResumeState,
     UploadCompleteRequest,
     UploadInitRequest,
     UploadInitResponse,
@@ -556,3 +558,84 @@ async def grant_on_folder(
         **GrantOut.model_validate(grant).model_dump(exclude={"email"}),
         email=target.email,
     )
+
+
+# --- Resume (Architecture.md §2a) -------------------------------------------------
+
+@router.get("/uploads", response_model=list[InFlightUpload])
+async def list_in_flight_uploads(
+    access: ViewerAccess, user: CurrentUser, db: DbSession
+) -> list[InFlightUpload]:
+    """Uploads left unfinished — after a refresh, a closed tab, or a lost connection.
+
+    Scoped to the workspace like everything else: an interrupted upload belonging to a
+    workspace the caller is not a member of is not listed, and the workspace itself
+    reads as not found.
+    """
+    workspace, _ = access
+    rows = await file_service.list_in_flight(db, workspace.id)
+
+    out: list[InFlightUpload] = []
+    for version, file, uploaded, parts_done in rows:
+        # Only sessions the caller may actually write to.
+        role = await permissions.resolve_object_role(
+            db,
+            workspace_id=workspace.id,
+            user=user,
+            file_id=file.id,
+            folder_id=file.folder_id,
+        )
+        if role is None or not role.can_act_as(WorkspaceRole.EDITOR):
+            continue
+        out.append(
+            InFlightUpload(
+                version_id=version.id,
+                file_id=file.id,
+                file_name=file.name,
+                folder_id=file.folder_id,
+                total_bytes=version.size_bytes,
+                uploaded_bytes=uploaded,
+                parts_completed=parts_done,
+                parts_total=len(storage.plan_parts(version.size_bytes)),
+                started_at=version.upload_started_at,
+                version_number=version.version_number,
+            )
+        )
+    return out
+
+
+@router.get("/uploads/{version_id}/parts", response_model=ResumeState)
+async def get_resume_state(
+    version_id: uuid.UUID, access: ViewerAccess, user: CurrentUser, db: DbSession
+) -> ResumeState:
+    """Which parts already landed, and fresh URLs for the ones that did not."""
+    workspace, _ = access
+    version = await db.get(FileVersion, version_id)
+    if version is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Upload session not found.")
+    file = await _load(db, workspace.id, version.file_id)
+    await _require(db, workspace, user, file, WorkspaceRole.EDITOR)
+
+    try:
+        state = await file_service.resume_state(
+            db, workspace=workspace, version=version, file=file
+        )
+    except Exception as exc:
+        raise _translate(exc) from exc
+    return ResumeState(**state)
+
+
+@router.delete("/uploads/{version_id}", status_code=204)
+async def cancel_upload(
+    version_id: uuid.UUID, access: ViewerAccess, user: CurrentUser, db: DbSession
+) -> None:
+    """Abandon an interrupted upload and return its reserved quota immediately."""
+    workspace, _ = access
+    version = await db.get(FileVersion, version_id)
+    if version is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Upload session not found.")
+    file = await _load(db, workspace.id, version.file_id)
+    await _require(db, workspace, user, file, WorkspaceRole.EDITOR)
+
+    await file_service.abort_upload(db, workspace=workspace, version=version)
+    await db.commit()

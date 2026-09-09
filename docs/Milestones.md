@@ -8,7 +8,7 @@ has actually been performed, not when the code merely exists (Rules.md §6).
 | M0 | Project scaffold: FastAPI backend, Next.js frontend, Docker Compose, Celery+Redis wired, storage bucket configured | **Done** (7 Sep 2026) |
 | M1 | Auth + workspace + RBAC (Owner/Editor/Viewer), workspace invitations | **Done** (8 Sep 2026) |
 | M2 | File/folder CRUD, nested folders, per-object permissions, chunked upload API, quota | **Done** (8 Sep 2026) |
-| M3 | Upload UX: drag & drop, per-chunk progress, retry/resume (frontend) | Not started |
+| M3 | Upload UX: drag & drop, per-chunk progress, retry/resume, auth UI, folder browser | **Done** (9 Sep 2026) |
 | M4 | Malware scanning (Celery + VirusTotal) + file versioning | Not started |
 | M5 | Sharing: 4 link types, password protection, expiry, modifiers | Not started |
 | M6 | Audit log + email notifications (Resend) | Not started |
@@ -350,3 +350,86 @@ workspace role; restore does not resurrect separately-deleted items.
   days. Belongs with M4's Celery work.
 - **`mime_type` is client-supplied** and stored as metadata only; never used for a
   security decision.
+
+
+---
+
+## M3 — Upload UX
+
+Branch `feature/m3-upload-ux`.
+
+### Docs amended first
+
+Architecture v1.5 (§2a resumable upload), Design.md (upload queue, quota pre-check,
+interrupted uploads, auth surfaces), PRD §10a (two scope additions, two deferrals).
+
+Two additions to a milestone scoped as "purely frontend", both because M3 could not
+otherwise be *validated*: **minimal auth UI** (no login page existed, so nothing in
+M1/M2 could be exercised from a browser at all) and **two resume endpoints** (the
+server knows which parts landed; nothing exposed it). `ListParts` support was verified
+against the live bucket before designing on it.
+
+Deferred to M7: folder drag-and-drop (needs recursive traversal plus server-side
+structure creation) and the table/grid toggle from Design.md §5.
+
+### Delivered
+
+**Backend** — `GET /uploads` (in-flight sessions with real progress), `GET
+/uploads/{version_id}/parts` (completed parts plus freshly signed URLs and an
+authoritative byte layout), `DELETE /uploads/{version_id}` (abandon and reclaim quota).
+
+**Frontend** — sign in / sign up / sign out, workspace switcher, folder browser with
+breadcrumbs and folder creation, drag-and-drop dropzone, upload queue with real
+per-chunk progress, quota meter, interrupted-upload recovery, scan badges.
+
+- **Progress is real**: a fraction of bytes that actually landed, with `part n/m`
+  alongside it. No indeterminate spinner (Design.md §5).
+- **Failures are classified**: network/timeout/5xx/429 retry with exponential backoff
+  up to four attempts per part; 403/404/409/413 stop immediately with a specific
+  message and no retry button. An upload that cannot succeed never presents as trying.
+- **Quota is checked before the first byte moves**, against both the per-file provider
+  ceiling and remaining workspace space, and accounts for what is already queued so
+  several individually-fitting files cannot overflow together.
+- **Resume is honest**: it says the browser cannot reopen the file by itself and asks
+  for the same file, verified on name and exact byte size.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Backend suite | 152 passed |
+| Backend lint | clean |
+| Frontend production build | compiled + typechecked, 6 routes |
+| Frontend lint (`eslint --max-warnings=0`) | clean |
+| **Resume byte integrity, real storage** | 20MB in 3 parts, interrupted after part 1, resumed — **SHA-256 identical** |
+| Interrupted upload discoverable | correct progress, 1/3 parts, 8MB reported |
+| Layout offsets | exact and contiguous: (0, 8388608), (8388608, 8388608), (16777216, 4194304) |
+| Cancel reclaims quota | 30408704 → 20971520 |
+| Nothing dangling after resume | in-flight list empty, quota counts the file once |
+
+Adversarial, against the live stack: an outsider gets 404 listing another workspace's
+uploads, 404 fetching resume URLs by either workspace id, 404 cancelling; sees an empty
+list in their own workspace; a viewer sees no in-flight uploads and gets 403 on resume;
+anonymous folder listing is 401. Folder listing was probed by substituting workspace ids
+in both directions.
+
+### Defect found by running it
+
+**`ListParts` does not return `Size` on Supabase, only `PartNumber`, `LastModified` and
+`ETag`.** AWS returns `Size`, the code assumed it, and the first real call raised
+`KeyError: 'Size'` — a 500 on the listing endpoint. The automated suite passed
+throughout, because the stub returned an empty part list and never exercised the field.
+
+Two fixes, and the second matters more: part sizes now come from our own upload plan
+rather than the provider (which is the authoritative source for them anyway), and **the
+stub was corrected to mirror the provider's real shape**, with new tests that simulate
+parts already landed. A stub more generous than reality is worse than no stub, because
+it converts a real defect into a passing suite.
+
+### Open at the end of M3
+
+- **Folder drag-and-drop and table/grid toggle** deferred to M7.
+- **No resume across devices**: an interrupted upload is listed anywhere you sign in,
+  but only the machine holding the file can finish it.
+- **Auth UI is deliberately plain**; the design pass is M7.
+- Uploads still land as `scan_skipped` until M4 wires VirusTotal.

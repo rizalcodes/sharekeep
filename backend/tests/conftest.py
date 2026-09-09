@@ -151,6 +151,8 @@ def stub_storage(monkeypatch):
     with real bytes during M0, and is re-proven in M2 manual validation.
     """
     uploads: dict[str, list] = {}
+    # Lets a test simulate parts that already landed, keyed by storage key.
+    landed_parts: dict[str, list[int]] = {}
 
     def create_multipart_upload(storage_key, content_type):
         upload_id = f"upload-{len(uploads) + 1}"
@@ -172,13 +174,23 @@ def stub_storage(monkeypatch):
     monkeypatch.setattr(storage_module, "presign_part", presign_part)
     monkeypatch.setattr(storage_module, "complete_multipart_upload", complete_multipart_upload)
     monkeypatch.setattr(storage_module, "abort_multipart_upload", abort_multipart_upload)
+    # Mirrors the real provider's shape: part number and ETag only, no size. An
+    # earlier stub implied a `size_bytes` field that Supabase does not return, and the
+    # suite passed while the real endpoint raised KeyError on its first live call.
+    monkeypatch.setattr(
+        storage_module,
+        "list_parts",
+        lambda key, upload_id: [
+            {"part_number": n, "etag": f'"etag-{n}"'} for n in landed_parts.get(key, [])
+        ],
+    )
     monkeypatch.setattr(storage_module, "delete_object", lambda key: None)
     monkeypatch.setattr(
         storage_module,
         "generate_download_url",
         lambda key, download_filename=None: f"https://storage.test/{key}?signed=1",
     )
-    return uploads
+    return {"uploads": uploads, "landed_parts": landed_parts}
 
 
 async def upload_file(
