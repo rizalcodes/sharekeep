@@ -426,6 +426,25 @@ stub was corrected to mirror the provider's real shape**, with new tests that si
 parts already landed. A stub more generous than reality is worse than no stub, because
 it converts a real defect into a passing suite.
 
+### Second defect, found after M3 was marked done
+
+**`FILESHARE_PUBLIC_API_BASE_URL` never reached the browser.** It was a runtime
+`environment:` entry on the `frontend` service, but Next.js inlines `NEXT_PUBLIC_*`
+into the bundle at build time. Nothing failed locally: the compose default and the
+`ARG` default in `frontend/Dockerfile` were both `http://localhost:8000`, so the right
+value was present for the wrong reason.
+
+It would have surfaced first at M8, and quietly — the deployed bundle would have called
+`localhost:8000`, meaning each visitor's own machine, with no server-side log to point
+at the cause. Moved to `build.args`; the runtime entry was removed rather than kept,
+since leaving it would advertise a knob that does nothing.
+
+Verified by building with a deliberately different value and grepping the bundle
+actually served, plus a negative control that rebuilt the old configuration: the fixed
+build put the probe value in 4 chunks and `localhost:8000` in none, the control did the
+exact reverse while the environment variable was set. "The container starts" would not
+have distinguished the fix from the coincidence it replaced.
+
 ### Open at the end of M3
 
 - **Folder drag-and-drop and table/grid toggle** deferred to M7.

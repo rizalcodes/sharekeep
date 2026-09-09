@@ -2,7 +2,7 @@
 
 **Scope note:** system/service design — how components interact, the background job pipeline, security architecture. Not data structure (`Schema.md`) or naming/conventions (`Rules.md`).
 
-**Version:** v1.5 — resumable upload specified at the start of M3, 9 September 2026 (see §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
+**Version:** v1.6 — frontend build-time configuration corrected after M3, 9 September 2026 (see §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
 
 ---
 
@@ -189,6 +189,8 @@ No credential or data sharing with the n8n project's services — fully isolated
 
 Reverse proxy / HTTPS: reuse the VPS's existing reverse proxy if one is present from the n8n deployment; otherwise stand up new routing. Confirm actual VPS state at M0/M8.
 
+**Frontend configuration is baked in at build time, not read at runtime.** Next.js inlines every `NEXT_PUBLIC_*` variable into the JavaScript bundle when `next build` runs. `FILESHARE_PUBLIC_API_BASE_URL` is therefore passed to the frontend image as a **build argument** (`build.args`), never as a runtime `environment:` entry — a runtime entry is silently ignored by browser code. Two operational consequences: changing the API origin requires `docker compose build frontend` rather than a restart, and the image must be built with the public HTTPS origin already set, so an image built locally cannot be promoted to the VPS unchanged. Corrected after M3; see §15.
+
 ## 8. Object Storage Configuration
 
 **Provider: Supabase Storage via its S3-compatible endpoint** (`https://<project_ref>.storage.supabase.co/storage/v1/s3`), using SigV4 presigning and boto3. A **new, separate Supabase project** — never the one used by `ecommerce-ai-platform` — for the same isolation reason this project does not share credentials with the n8n deployment.
@@ -278,3 +280,18 @@ The CORS gap is the one with architectural consequence: §2 step 4 depends on th
 1. **§2a added — resumable upload.** The upload flow described how to start and finish an upload but not how to recover one interrupted half way, and no endpoint exposed which parts had landed. `ListParts` support was verified empirically against the live bucket before designing on it, rather than assumed.
 2. **The browser limitation is recorded rather than papered over.** Resume requires the user to re-select the file; a `File` object cannot survive a page reload. The design says so plainly so nobody later reads "resume" as automatic.
 3. **Minimal authentication UI pulled into M3.** Every M1/M2 endpoint requires a session cookie, so without login pages the upload UI could be neither used nor manually validated — the standard every prior milestone has been held to. Visual polish stays in M7.
+
+## 15. Amendment Log — v1.6 (9 Sep 2026, after M3): frontend build-time configuration
+
+**Found by running it, not by reading it.** After the M3 frontend image was rebuilt, tracing how `FILESHARE_PUBLIC_API_BASE_URL` actually reached the browser showed that it never did. It was declared as a runtime `environment:` entry on the `frontend` service, but Next.js inlines `NEXT_PUBLIC_*` at build time. The stack appeared correct only because two independent defaults — the compose default and the `ARG` default in `frontend/Dockerfile` — were both `http://localhost:8000`.
+
+Nothing was broken locally, and nothing would have failed loudly at M8 either. The deployed bundle would have called `localhost:8000` — meaning each visitor's own machine — and every request would have failed in the browser with no server-side log pointing at the cause.
+
+Changes:
+
+- `docker-compose.yml`: `NEXT_PUBLIC_API_BASE_URL` moved from `environment:` to `build.args`. The runtime entry was **removed** rather than kept alongside; leaving it would advertise a runtime knob that does not exist.
+- `docker-compose.prod.yml`: records that the image must be built with the public HTTPS origin, and that a locally built image cannot be promoted unchanged.
+- `.env.example`: the variable is annotated as build-time.
+- §7 above states the rule.
+
+Verified by building the image with a value deliberately different from the default, then confirming that exact string is present in the JS actually served to the browser and that the old default appears nowhere in it. Confirming only that the container starts would not have distinguished the fix from the coincidence it replaced.

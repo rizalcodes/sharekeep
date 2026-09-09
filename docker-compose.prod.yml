@@ -23,6 +23,12 @@ services:
     networks: [fileshare-internal, proxy]
 
   frontend:
+    # FILESHARE_PUBLIC_API_BASE_URL must be set to the PUBLIC https origin of the API
+    # before the image is built (it is a build arg in the base file, not runtime env).
+    # Deploying a locally-built image here would ship a bundle pointing at
+    # localhost:8000 — i.e. the visitor's own machine — and every request would fail
+    # with nothing in the logs to explain it. Build on the target, or pass the public
+    # value at build time.
     ports: !reset []
     networks: [fileshare-internal, proxy]
 

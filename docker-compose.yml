@@ -107,10 +107,15 @@ services:
   frontend:
     build:
       context: ./frontend
+      # NEXT_PUBLIC_* is inlined into the JS bundle at BUILD time, so this has to be a
+      # build arg. As a runtime `environment:` entry it was silently inert for browser
+      # code — it only appeared to work because this default and the one baked into the
+      # image happened to match. Consequence: changing FILESHARE_PUBLIC_API_BASE_URL
+      # requires `docker compose build frontend`, not just a restart.
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${FILESHARE_PUBLIC_API_BASE_URL:-http://localhost:8000}
     container_name: fileshare-frontend
     restart: unless-stopped
-    environment:
-      NEXT_PUBLIC_API_BASE_URL: ${FILESHARE_PUBLIC_API_BASE_URL:-http://localhost:8000}
     depends_on: [backend]
     ports:
       - "127.0.0.1:${FILESHARE_FRONTEND_PORT:-3000}:3000"

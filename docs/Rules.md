@@ -25,6 +25,8 @@ Prefix all env vars `FILESHARE_` to avoid collisions with other projects running
 
 `.env` is never committed. `.env.example` (placeholder values only) is the tracked version.
 
+**`NEXT_PUBLIC_*` variables are build-time, not runtime.** Next.js inlines them into the client bundle during `next build`. Any such value must reach the frontend image through `build.args`, never a runtime `environment:` entry — the latter is silently ignored by browser code and fails without an error. Changing one requires rebuilding the image, not restarting the container. (Corrected after M3; see `Architecture.md` §15.)
+
 ## 3. Credential Handling Rules
 
 - Storage credentials (Supabase service role key and S3 access key/secret), VirusTotal API key, Resend API key: loaded from environment only, never hardcoded, never logged (even at debug level — file contents and credentials must never appear in application logs).
