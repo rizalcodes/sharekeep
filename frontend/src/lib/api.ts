@@ -5,6 +5,11 @@ import type {
   Quota,
   ResumeState,
   Session,
+  ShareDownload,
+  ShareLinkCreated,
+  ShareLinkOut,
+  ShareLinkType,
+  SharePreview,
   UploadInitResponse,
 } from "@/lib/types";
 
@@ -147,6 +152,51 @@ export const uploads = {
     apiFetch<void>(`/workspaces/${workspaceId}/uploads/${versionId}`, {
       method: "DELETE",
     }),
+};
+
+// --- Share links ------------------------------------------------------------
+//
+// `shares.create` returns the only copy of the raw token that will ever exist, so the
+// caller must show it before discarding the response (Architecture.md §4.2).
+
+export const shares = {
+  create: (
+    workspaceId: string,
+    fileId: string,
+    body: {
+      link_type: ShareLinkType;
+      password?: string | null;
+      expires_at?: string | null;
+      max_downloads?: number | null;
+      allowed_user_email?: string | null;
+    },
+  ) =>
+    apiFetch<ShareLinkCreated>(
+      `/workspaces/${workspaceId}/files/${fileId}/shares`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  list: (workspaceId: string, fileId: string) =>
+    apiFetch<ShareLinkOut[]>(
+      `/workspaces/${workspaceId}/files/${fileId}/shares`,
+    ),
+  revoke: (workspaceId: string, shareId: string) =>
+    apiFetch<void>(`/workspaces/${workspaceId}/shares/${shareId}`, {
+      method: "DELETE",
+    }),
+};
+
+/** The public side. No session required, and none is sent that matters. */
+export const publicShare = {
+  preview: (token: string) =>
+    apiFetch<SharePreview>(`/shares/${encodeURIComponent(token)}`),
+  redeem: (token: string, password?: string) =>
+    apiFetch<ShareDownload>(
+      `/shares/${encodeURIComponent(token)}/download`,
+      {
+        method: "POST",
+        body: JSON.stringify(password ? { password } : {}),
+      },
+    ),
 };
 
 export function fetchReadiness(): Promise<ReadinessResponse> {

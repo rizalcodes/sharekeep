@@ -646,3 +646,55 @@ async def test_a_share_url_is_signed_with_the_short_share_ttl(make_client, stub_
     stub_storage["download_urls"].clear()
     assert (await owner.get(f"{WS}/{ws}/files/{file_id}/download")).status_code == 200
     assert stub_storage["download_urls"][0]["ttl_seconds"] is None
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_phrase"),
+    [
+        (ScanStatus.PENDING, "not finished its malware scan"),
+        (ScanStatus.SCANNING, "not finished its malware scan"),
+        (ScanStatus.FLAGGED, "flagged as malicious"),
+        (ScanStatus.SCAN_FAILED, "could not be scanned successfully"),
+    ],
+)
+async def test_the_refusal_names_the_actual_reason(make_client, db, status, expected_phrase):
+    """Found by manual validation: the refusal explained overrides to someone whose
+    scan had simply not finished. A message about a policy that does not apply is worse
+    than a vague one, because the reader acts on it."""
+    client, ws, _ = await _workspace(make_client, f"m5-why-{status.value}@example.com")
+    file_id = (await upload_file(client, ws, "why.txt")).json()["id"]
+    file = await db.get(File, uuid.UUID(file_id))
+    version = await db.get(FileVersion, file.current_version_id)
+    version.scan_status = status
+    await db.flush()
+
+    response = await client.post(
+        f"{WS}/{ws}/files/{file_id}/shares",
+        json={"link_type": ShareLinkType.PUBLIC.value},
+    )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert expected_phrase in detail
+    if status in (ScanStatus.PENDING, ScanStatus.SCANNING):
+        assert "override" not in detail.lower(), "explained an irrelevant policy"
+
+
+async def test_an_overridden_file_gets_the_override_explanation(make_client, db):
+    """The one case where mentioning the override is the correct thing to say."""
+    client, ws, _ = await _workspace(make_client, "m5-why-override@example.com")
+    file_id = (await upload_file(client, ws, "released.exe")).json()["id"]
+    file = await db.get(File, uuid.UUID(file_id))
+    version = await db.get(FileVersion, file.current_version_id)
+    version.scan_status = ScanStatus.FLAGGED
+    await db.flush()
+    await client.post(
+        f"{WS}/{ws}/files/{file_id}/versions/{version.id}/scan-override",
+        json={"reason": "Reviewed and accepted for internal use."},
+    )
+
+    response = await client.post(
+        f"{WS}/{ws}/files/{file_id}/shares",
+        json={"link_type": ShareLinkType.PUBLIC.value},
+    )
+    assert response.status_code == 409
+    assert "does not extend to share links" in response.json()["detail"]

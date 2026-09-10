@@ -600,3 +600,120 @@ that instead of a fiction.
   task's own scheduled retry.
 - No notification is sent when a file is flagged. The `scan_flagged` audit entry is
   written and the notification queue is M6.
+
+## M5 — Sharing: four link types · Done
+
+Branch `feature/m5-sharing`. Status: complete, verified against the live stack.
+
+### Docs amended first
+
+Architecture §4.2–§4.5 was rewritten rather than annotated (v1.8, §17), because four
+decisions changed the rules rather than adding to them. Each is recorded in PRD §10b's
+sibling section §10c with its reasoning.
+
+1. **Tokens are stored hashed.** Schema §9 specified a raw `token` column, which would
+   have made the most widely *distributed* bearer token in the system the only one not
+   protected the way M1 already protects refresh tokens and invitations. The cost is
+   stated up front instead of discovered: a link cannot be copied again after creation.
+2. **A scan override does not extend to share links.** M4 lets an owner release a
+   flagged file for their own workspace; letting that same decision feed a public link
+   would turn "I accept this risk" into "strangers accept this risk on my word".
+3. **Only attempts against links that exist are audited.** An unknown token has no
+   workspace to attribute and no target that resolves, and its volume is
+   attacker-controlled — with a fail-open inbound limiter as the only bound.
+4. **Share links get their own 60-second signed-URL TTL.** Once a URL is issued,
+   revoking the link cannot recall it, so the TTL *is* the revocation window.
+
+Three further points were specified because resolution is meaningless without them:
+`max_downloads` counts resolutions rather than completed downloads and increments under
+a row lock; a link tracks the file so it always serves the current version; and
+validation must accept type+modifier combinations. Schema went to v1.5, Rules §3 gained
+the hashed-bearer-token convention as a rule rather than a coincidence of three
+implementations, and Design §5 covers the once-only link display, the independent
+modifiers, the honest "uses" label, and refusing to share a flagged file.
+
+### Verified rather than assumed, before designing
+
+The live bucket was probed first, because §4.3's claims are the provider's to keep:
+
+- `ResponseContentDisposition` **is** honoured, so "download-only" is a fact.
+- Supabase serves `content-type: text/plain` regardless of what an object was stored
+  as, so a shared `.html` or `.svg` cannot execute in a visitor's browser — a second
+  independent layer. The corollary: `files.mime_type` is our own UI metadata, not what
+  storage returns.
+- A `PUT` against a download URL is refused 403; the signature really is GET-scoped.
+- An expired signature returns HTTP **400**, not 403.
+- The signed URL discloses the whole storage key — workspace, file and version UUIDs
+  plus the filename — to the recipient. Low severity, since every workspace endpoint
+  refuses non-members independently, but recorded because a share recipient is by
+  definition outside the workspace.
+
+### Delivered
+
+- `share_links` (migration 0005, hand-written), with CHECKs for the three type
+  requirements, a rejection of `max_downloads = 0`, and UNIQUE on `token_hash`.
+- `services/shares.py`: creation, resolution against every rule in §4.2, revocation,
+  and `version_is_shareable` — the stricter scan rule.
+- Five endpoints: create, list and revoke under the workspace prefix; preview and redeem
+  requiring no authentication at all.
+- Per-IP throttling on token attempts and per-link throttling on password attempts.
+- Frontend: a share dialog presenting type and modifiers as independent choices, and a
+  public `/s/[token]` page handling password entry, sign-in for private links, and every
+  refusal with its own reason.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Backend suite | 237 passing, 0 skipped, ruff clean |
+| Frontend | eslint clean, production build clean across 7 routes |
+| Migration | upgrade, downgrade, re-upgrade clean; parity test confirms it matches the models |
+| End-to-end | verified against live Supabase with real bytes and a genuinely anonymous client |
+
+The live run: a public link delivered **byte-identical** content to a visitor with no
+account, as an attachment rather than inline. A password link refused an empty and a
+wrong password, withheld the file name until the password was right, then delivered
+identical bytes. A private link refused an anonymous caller (401) and a signed-in
+stranger (403), worked for the named recipient, and gave them nothing else in the
+workspace (404 on the folder listing). A two-use limit allowed two and returned 410 on
+the third. An unknown token returned a flat 404. Per-IP throttling engaged.
+
+**The revocation window was proven in both directions**, since it is a documented
+limitation rather than something the design removes: after revoking, the link itself
+returned 410 while an already-issued URL still returned 200 — and that URL was refused
+with HTTP 400 once its 60 seconds elapsed.
+
+### Defects found by running it
+
+**The refusal explained the wrong policy.** The first live run tried to share a
+just-uploaded file and got a 409 telling the user that a scan override does not extend
+to share links — while the actual reason was that the scan had not finished yet. A
+message about a policy that does not apply is worse than a vague one, because the reader
+acts on it. Now `share_refusal_reason` gives the reason that matches the state, with
+tests asserting that a pending file's refusal does not mention overrides at all.
+
+**The storage stub did not mirror the real signature.** Adding `ttl_seconds` to
+`generate_download_url` broke every share test with `TypeError: <lambda>() got an
+unexpected keyword argument` — the same class of fault as M3's `ListParts` stub. Fixed by
+mirroring the signature *and* recording every call, which turned the weakness into an
+assertion: the 60-second TTL is now checked against what storage was actually asked for
+rather than against the response body, which could report 60 while signing for 300. The
+authenticated download is asserted to still use the longer default, proving the two are
+separate settings rather than one renamed.
+
+Also worth recording: `params` is a Promise in Next 16, unwrapped with React's `use`.
+The bundled docs said so; writing `params.token` would have silently been `undefined`.
+The repo's own `frontend/AGENTS.md` exists to prompt exactly that check.
+
+### Open at the end of M5
+
+- **A revoked link keeps working for up to 60 seconds** through an already-issued URL.
+  Inherent to presigned URLs; narrowed, documented, and proven, not eliminated.
+- **`max_downloads` counts uses, not downloads.** A visitor who abandons a transfer has
+  still spent one, and a single issued URL can be replayed until it expires.
+- **Share links target files only, not folders** (Schema §9 v1 scope).
+- **A private link supports one recipient**; multiple recipients means multiple links.
+- **No email notification when a file is shared.** The audit entries are written; the
+  notification pipeline is M6.
+- **`allowed_user_email` must already have an account.** Refused explicitly at creation
+  rather than producing a link nobody can open.

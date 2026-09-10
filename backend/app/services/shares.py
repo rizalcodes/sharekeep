@@ -96,6 +96,39 @@ def version_is_shareable(version: FileVersion) -> bool:
     return version.scan_status.allows_download_without_override
 
 
+def share_refusal_reason(version: FileVersion) -> str:
+    """Why this version cannot be shared, in words that match the actual cause.
+
+    Added after M5 manual validation returned the override explanation for a file whose
+    scan simply had not finished yet — telling a user about a policy that had nothing to
+    do with their situation. Same discipline as `scan.download_refusal_reason`: the
+    distinction decides whether waiting will help.
+    """
+    from app.models.enums import ScanStatus
+    from app.services import scan
+
+    status = version.scan_status
+    if status in (ScanStatus.PENDING, ScanStatus.SCANNING):
+        return (
+            "This file has not finished its malware scan yet, so it cannot be shared. "
+            "Try again once the scan completes."
+        )
+    if scan.has_override(version):
+        return (
+            "This file was flagged by the scanner. It was released for use inside this "
+            "workspace, but that release deliberately does not extend to share links — "
+            "the people a link reaches never saw the flag."
+        )
+    if status is ScanStatus.FLAGGED:
+        return "This file was flagged as malicious by the scanner and cannot be shared."
+    if status is ScanStatus.SCAN_FAILED:
+        return (
+            "This file could not be scanned successfully, so it cannot be shared until "
+            "a scan succeeds."
+        )
+    return f"This file cannot be shared while its scan status is '{status.value}'."
+
+
 # ---------------------------------------------------------------------- creation ----
 
 

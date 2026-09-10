@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { ApiError, auth, folders, uploads, workspaces } from "@/lib/api";
 import { formatBytes, formatRelative } from "@/lib/format";
 import type {
+  FileOut,
   FolderListing,
   InFlightUpload,
   Quota,
@@ -21,6 +22,7 @@ import {
   type UploadItem,
 } from "@/lib/upload-manager";
 import { ScanBadge } from "@/components/scan-badge";
+import { ShareDialog } from "@/components/share-dialog";
 import { UploadQueue } from "@/components/upload-queue";
 
 export default function FilesPage() {
@@ -29,6 +31,7 @@ export default function FilesPage() {
   const [session, setSession] = useState<Session | null>(null);
   const [workspace, setWorkspace] = useState<WorkspaceSummary | null>(null);
   const [folderId, setFolderId] = useState<string | null>(null);
+  const [sharing, setSharing] = useState<FileOut | null>(null);
   const [listing, setListing] = useState<FolderListing | null>(null);
   const [quota, setQuota] = useState<Quota | null>(null);
   const [interrupted, setInterrupted] = useState<InFlightUpload[]>([]);
@@ -468,6 +471,7 @@ export default function FilesPage() {
       <Browser
         listing={listing}
         onOpen={setFolderId}
+        onShare={setSharing}
         onNewFolder={async (name) => {
           if (!workspace) return;
           try {
@@ -480,6 +484,17 @@ export default function FilesPage() {
           }
         }}
       />
+
+      {sharing && workspace && (
+        <ShareDialog
+          workspaceId={workspace.id}
+          file={sharing}
+          onClose={() => {
+            setSharing(null);
+            void refresh();
+          }}
+        />
+      )}
     </main>
   );
 }
@@ -488,10 +503,12 @@ function Browser({
   listing,
   onOpen,
   onNewFolder,
+  onShare,
 }: {
   listing: FolderListing | null;
   onOpen: (id: string | null) => void;
   onNewFolder: (name: string) => void;
+  onShare: (file: FileOut) => void;
 }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
@@ -606,6 +623,27 @@ function Browser({
               <span className="w-20 shrink-0 text-right font-mono text-xs text-ink-subtle">
                 {formatBytes(file.size_bytes)}
               </span>
+              {/* Offered only when the file could actually be shared. A share button
+                  that always opens a dialog which then refuses is worse than no button:
+                  the reason belongs where the decision is made. Note this is stricter
+                  than downloadable — a released flagged file is downloadable here and
+                  still not shareable (Architecture.md §4.2). */}
+              {file.scan_status === "clean" || file.scan_status === "scan_skipped" ? (
+                <button
+                  type="button"
+                  onClick={() => onShare(file)}
+                  className="shrink-0 rounded px-2 py-0.5 text-xs text-primary transition-colors hover:bg-primary-subtle"
+                >
+                  Share
+                </button>
+              ) : (
+                <span
+                  className="shrink-0 px-2 py-0.5 text-xs text-ink-subtle"
+                  title="This file cannot be shared in its current scan state."
+                >
+                  &mdash;
+                </span>
+              )}
             </li>
           ))}
         </ul>

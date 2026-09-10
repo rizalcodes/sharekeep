@@ -124,3 +124,54 @@ export type ResumeState = {
   layout: PartLayout[];
   uploaded_bytes: number;
 };
+
+// --- Share links (Architecture.md §4.2, added at M5) ------------------------
+
+export type ShareLinkType =
+  | "public"
+  | "private"
+  | "password_protected"
+  | "expiring";
+
+/**
+ * A link as its owner sees it. Note the absence of a token: it is stored hashed, so
+ * there is nothing the server could send back here even if the UI asked.
+ */
+export type ShareLinkOut = {
+  id: string;
+  file_id: string;
+  link_type: ShareLinkType;
+  has_password: boolean;
+  allowed_user_id: string | null;
+  expires_at: string | null;
+  max_downloads: number | null;
+  /** Redemptions, not completed downloads — the API never sees the bytes. */
+  uses: number;
+  revoked_at: string | null;
+  is_active: boolean;
+  created_by: string;
+  created_at: string;
+};
+
+/** The only response that carries a raw token, and only once. */
+export type ShareLinkCreated = ShareLinkOut & {
+  token: string;
+  url_path: string;
+};
+
+export type SharePreview = {
+  requires_password: boolean;
+  requires_sign_in: boolean;
+  expires_at: string | null;
+  /** Withheld while a password gate remains, deliberately. */
+  file_name: string | null;
+  size_bytes: number | null;
+};
+
+export type ShareDownload = {
+  url: string;
+  expires_in_seconds: number;
+  file_name: string;
+  size_bytes: number;
+  uses_remaining: number | null;
+};

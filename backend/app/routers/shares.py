@@ -123,9 +123,7 @@ async def create_share(
         )
     if not shares.version_is_shareable(version):
         raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            "This file cannot be shared in its current scan state. A scan override "
-            "applies inside this workspace only and does not extend to share links.",
+            status.HTTP_409_CONFLICT, shares.share_refusal_reason(version)
         )
 
     allowed_user_id = None
