@@ -444,3 +444,39 @@ async def test_a_skipped_scan_carries_its_reason_to_the_listing(make_client, db)
     assert row["scan_status"] == ScanStatus.SCAN_SKIPPED.value
     assert row["is_downloadable"] is True
     assert row["scan_reason"] == "not previously seen by the scanner"
+
+
+# ---------------------------------------------------------------- the switch itself ----
+
+
+async def test_with_scanning_on_an_upload_is_pending_and_withheld(make_client, monkeypatch):
+    """`scanning_enabled` changes behaviour, not just capability (Architecture.md §3).
+
+    The suite pins the switch off so unrelated tests are deterministic — which is
+    exactly how M4 discovered they had been reading it from the ambient environment. The
+    enabled path therefore has to be asserted somewhere on purpose, here.
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "scanning_enabled", True)
+
+    client, ws = await _workspace(make_client, "m4-switch@example.com")
+    body = (await upload_file(client, ws, "waiting.txt")).json()
+
+    # Not `clean` and not `scan_skipped`: nothing has looked at it yet.
+    assert body["scan_status"] == ScanStatus.PENDING.value
+    assert body["is_downloadable"] is False
+
+    refused = await client.get(f"{WS}/{ws}/files/{body['id']}/download")
+    assert refused.status_code == 403
+    assert "queued" in refused.json()["detail"].lower()
+
+
+async def test_with_scanning_off_an_upload_is_downloadable_at_once(make_client):
+    """The other half of the switch, stated rather than assumed."""
+    client, ws = await _workspace(make_client, "m4-switch-off@example.com")
+    body = (await upload_file(client, ws, "immediate.txt")).json()
+
+    assert body["scan_status"] == ScanStatus.SCAN_SKIPPED.value
+    assert body["is_downloadable"] is True
+    assert (await client.get(f"{WS}/{ws}/files/{body['id']}/download")).status_code == 200

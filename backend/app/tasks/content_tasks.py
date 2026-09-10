@@ -12,6 +12,7 @@ import hashlib
 import logging
 import uuid
 
+from app.core import async_bridge
 from app.core.celery_app import celery_app
 from app.core.config import settings
 from app.core.database import SessionLocal
@@ -22,10 +23,13 @@ logger = logging.getLogger(__name__)
 
 
 def _run(coro):
-    """Celery tasks are synchronous; the data layer is async."""
-    import asyncio
+    """Celery tasks are synchronous; the data layer is async.
 
-    return asyncio.run(coro)
+    Goes through `async_bridge` rather than `asyncio.run`: a fresh loop per task
+    invalidates the pooled connections held by the engine and the Redis clients, which
+    breaks the *second* task in any worker process.
+    """
+    return async_bridge.run(coro)
 
 
 def _hash_object(storage_key: str) -> tuple[str, int]:

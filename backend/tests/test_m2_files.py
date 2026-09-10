@@ -160,7 +160,7 @@ async def test_pruned_versions_release_their_space(make_client):
 
 # --- Scan status gating (Architecture.md §3) --------------------------------------
 
-async def test_uploads_are_marked_not_scanned_until_m4(make_client):
+async def test_uploads_are_marked_not_scanned_when_scanning_is_off(make_client):
     """The badge must tell the truth. Marking an unscanned file `clean` would make the
     platform's core trust signal lie for two milestones (Design.md §5)."""
     client, ws = await _workspace(make_client, "f-scan@example.com")

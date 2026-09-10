@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
 
+from app.core import async_bridge
 from app.core.celery_app import celery_app
 from app.core.config import settings
 from app.core.database import SessionLocal
@@ -20,8 +20,12 @@ logger = logging.getLogger(__name__)
 
 
 def _run(coro):
-    """Celery tasks are synchronous; the data layer is async."""
-    return asyncio.run(coro)
+    """Celery tasks are synchronous; the data layer is async.
+
+    Shares the per-process loop (app.core.async_bridge). These tasks are rare enough
+    that `asyncio.run` never visibly broke here, but it was the same latent fault.
+    """
+    return async_bridge.run(coro)
 
 
 @celery_app.task(name="app.tasks.maintenance_tasks.ping")

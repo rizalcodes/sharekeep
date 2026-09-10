@@ -14,6 +14,13 @@ os.environ.setdefault("FILESHARE_SUPABASE_URL", "https://testproject.supabase.co
 os.environ.setdefault("FILESHARE_FRONTEND_ORIGIN", "http://localhost:3000")
 os.environ.setdefault("FILESHARE_COOKIE_SECURE", "false")
 
+# Forced, not defaulted. `scanning_enabled` is a behavioural switch, not a feature flag:
+# with it on, uploads land `pending` and are undownloadable until a scan resolves. The
+# suite read it from the ambient environment until M4, so turning scanning on in a local
+# .env silently changed the expected outcome of four tests that have nothing to do with
+# scanning. Tests that care about the enabled path set it themselves, per test.
+os.environ["FILESHARE_SCANNING_ENABLED"] = "false"
+
 
 @pytest.fixture(scope="session")
 def anyio_backend() -> str:

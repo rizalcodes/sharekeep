@@ -28,6 +28,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app.core import async_bridge
 from app.core.celery_app import celery_app
 from app.core.config import settings
 from app.core.database import SessionLocal
@@ -47,7 +48,8 @@ class BudgetUnavailable(Exception):
 
 
 def _run(coro):
-    return asyncio.run(coro)
+    """One loop per worker process, not one per task (app.core.async_bridge)."""
+    return async_bridge.run(coro)
 
 
 async def _reserve_or_raise() -> None:
@@ -143,6 +145,17 @@ async def _submit_and_poll(
             temp_path, filename=filename, size_bytes=size_bytes
         )
         logger.info("submitted version %s for analysis %s", version_id, analysis_id[:16])
+        # Persisted immediately: it is what tells a later requeue that an analysis is
+        # already running, so the file is not submitted a second time.
+        async with SessionLocal() as db:
+            version = await db.get(FileVersion, version_id)
+            if version is not None:
+                version.scan_detail = {
+                    **(version.scan_detail or {}),
+                    "analysis_id": analysis_id,
+                    "submitted_at": datetime.now(UTC).isoformat(),
+                }
+                await db.commit()
 
         for attempt in range(settings.virustotal_analysis_poll_attempts):
             await asyncio.sleep(settings.virustotal_analysis_poll_interval_seconds)
@@ -186,9 +199,6 @@ async def _scan(version_id: uuid.UUID) -> dict[str, Any]:
 
         # 1. Cheapest possible answer: content we have already asked about.
         cached = await scan.cached_verdict(db, checksum)
-        if cached is None:
-            await scan.mark(db, version, ScanStatus.SCANNING)
-            await db.commit()
 
     if cached is not None:
         settled = await _settle(version_id, cached, checksum)
@@ -204,7 +214,13 @@ async def _scan(version_id: uuid.UUID) -> dict[str, Any]:
         return {"status": ScanStatus.SCAN_SKIPPED.value, "requests_spent": 0}
 
     # 3. Hash lookup: one request, no content transmitted.
+    #
+    # The reservation comes BEFORE the version is marked `scanning`, and that order is
+    # load-bearing. Marking first meant a file waiting for budget displayed "Scanning"
+    # — a spinner that would not move for hours, which is exactly the dishonesty
+    # Design.md §5 forbids. Found by M4 manual validation, not by the suite.
     await _reserve_or_raise()
+    await _mark_scanning(version_id)
     verdict = await virustotal.lookup_hash(checksum)
     if verdict is not None:
         settled = await _settle(version_id, verdict, checksum)
@@ -255,6 +271,10 @@ def scan_file_version(self, file_version_id: str) -> dict[str, Any]:
         # same instant and immediately exhausts the reopened one.
         jitter = int.from_bytes(os.urandom(1), "big") % 30
         countdown = exc.retry_after_seconds + jitter
+        # Put the badge back to "queued" while it waits. Skipped when an analysis is
+        # genuinely in flight at VirusTotal, because then `scanning` is the truth and
+        # resetting would also lose the analysis id and pay to submit the file again.
+        _run(_release_scanning_claim(version_id))
         logger.info(
             "scan for version %s deferred %ds: %s", file_version_id, countdown, exc
         )
@@ -281,6 +301,31 @@ def scan_file_version(self, file_version_id: str) -> dict[str, Any]:
                 )
             )
             return {"status": ScanStatus.SCAN_FAILED.value, "detail": str(exc)}
+
+
+async def _mark_scanning(version_id: uuid.UUID) -> None:
+    """Claim the scan, once there is budget to actually do it."""
+    async with SessionLocal() as db:
+        version = await db.get(FileVersion, version_id)
+        if version is None or version.deleted_at is not None:
+            return
+        await scan.mark(db, version, ScanStatus.SCANNING)
+        await db.commit()
+
+
+async def _release_scanning_claim(version_id: uuid.UUID) -> None:
+    """Return a starved version to `pending` so its badge says "queued", not "scanning"."""
+    async with SessionLocal() as db:
+        version = await db.get(FileVersion, version_id)
+        if version is None or version.deleted_at is not None:
+            return
+        if version.scan_status is not ScanStatus.SCANNING:
+            return
+        if (version.scan_detail or {}).get("analysis_id"):
+            # An analysis really is running at VirusTotal; `scanning` is accurate.
+            return
+        await scan.mark(db, version, ScanStatus.PENDING)
+        await db.commit()
 
 
 async def _mark_failed(version_id: uuid.UUID, reason: str) -> None:

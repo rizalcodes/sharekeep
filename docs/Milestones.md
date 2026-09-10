@@ -451,4 +451,152 @@ have distinguished the fix from the coincidence it replaced.
 - **No resume across devices**: an interrupted upload is listed anywhere you sign in,
   but only the machine holding the file can finish it.
 - **Auth UI is deliberately plain**; the design pass is M7.
-- Uploads still land as `scan_skipped` until M4 wires VirusTotal.
+- Uploads still land as `scan_skipped` until M4 wires VirusTotal. *(Done in M4; the
+  state remains common, for a different and deliberate reason — see below.)*
+
+## M4 — Malware scanning (VirusTotal) · Done
+
+Branch `feature/m4-scanning`. Status: complete, verified against the live stack.
+
+### Docs amended first
+
+The rate-limiting reference document arrived at the start of this milestone. It was
+written for **inbound** API-key management — keys we issue to consumers, with tiers,
+owners and revocation — while M4 needs the mirror image: outbound budget management
+against one provider, with one key we hold ourselves. Only the counter pattern
+transferred. `api_keys`, `rate_limit_rules` and `api_usage_logs` describe a feature this
+product does not have and were not built; Architecture §3a records the reasoning table
+by table.
+
+Architecture §3 was rewritten rather than patched (v1.7, §16), because four decisions
+changed its shape:
+
+1. **"Tasks block on the limiter" was not implementable.** Tolerable for a per-minute
+   window, catastrophic for a per-day one: at `concurrency=2`, two tasks blocking on an
+   exhausted daily budget deadlock every scan for up to 24 hours. Replaced with
+   reserve-or-requeue — which the reference document itself recommends.
+2. **Budget exhaustion keeps a file `pending`, never `scan_skipped`.** Auto-promoting
+   would make exhaustion a scanning bypass anyone could trigger on purpose: burn the
+   day's quota with junk, then upload the payload and have it served unscanned.
+3. **File content is no longer submitted by default (§3b).** Free-tier submissions are
+   shared with the VirusTotal community, so the previous design published a private file
+   to a public pool whenever VirusTotal had not seen it. Now hash-lookup only unless
+   explicitly enabled.
+4. **`flagged` and `scan_failed` had no exit (§3d).** Both were described as lasting
+   "until an admin review clears it" with nothing owning that review, so M4 would have
+   shipped two permanently inaccessible states.
+
+Two more contradictions surfaced from reading §3 against the code M2 actually shipped:
+the checksum was computed **inside** the scan task, so `scanning_enabled=false` produced
+no integrity checksum at all; and step 9 described version bookkeeping that
+`complete_upload` has done synchronously since M2. Schema went to v1.4 (`scan_results`,
+the three override fields, the `scan_override` audit action), PRD gained §10b, and
+Design §5 gained the queued state, the required reason on "not scanned", and the rule
+that a released file keeps its flagged treatment.
+
+Also corrected: §3d and Design §5 said "owner or admin". There is no admin role — only
+viewer, editor, owner — so both documents were fixed rather than left implying one.
+
+### Delivered
+
+- **Outbound budget limiter** (`services/vt_budget.py`) — two calendar windows in Redis,
+  granted together in one atomic Lua script, **failing closed**.
+- **VirusTotal client** (`services/virustotal.py`) — hash lookup, submission, and
+  analysis polling, with response shapes established by probing the live API.
+- **Verdict cache** (`scan_results`) keyed on SHA-256, with a staleness window.
+- **Two tasks**: `compute_checksum` on every completed upload, and `scan_file_version`
+  ordered cheapest-first (cache → reservation → hash lookup → optional submission).
+- **Re-drive sweep** every 15 minutes for scans that stopped without resolving.
+- **Owner-only override endpoint**, recorded beside the status rather than over it.
+- **Scanner budget on `/health/ready`**, reported alongside the checks and never as one.
+- **Badge honesty** in the UI: a queued state distinct from scanning, a stated reason on
+  every "not scanned", and a released file that stays visibly flagged.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Backend suite | 195 passing, 0 skipped, ruff clean |
+| Frontend | eslint clean, production build clean across 6 routes |
+| Migration | upgrade, downgrade, re-upgrade all clean against the live database |
+| Migration/model parity | new permanent test, proven to fail on a deliberate divergence |
+| Budget limiter | verified against the running Redis, including atomicity and fail-closed |
+| VirusTotal client | verified against the live API, including the submission path |
+| End-to-end | verified against the live worker, live VirusTotal and live Supabase |
+
+The end-to-end run: EICAR uploaded, landed `pending`, resolved to `flagged` for exactly
+one request, refused to download with a reason naming the flag, checksum matching the
+real SHA-256. A second copy of the same content cost **zero** requests. A file
+VirusTotal had never seen became `scan_skipped` with the reason stated, not `clean`. The
+daily budget was then forced to its limit: the next upload **stayed `pending`** and
+undownloadable rather than being promoted — the bypass check. The sweep found it and it
+resolved once re-driven. Finally the flagged file was released: still `flagged`, now
+downloadable, bytes byte-identical, and the listing still saying it was flagged and who
+released it.
+
+### Defects found by running it
+
+**The event loop bug, and only manual validation could have caught it.** Every Celery
+task bridged sync to async with `asyncio.run`, which builds a **new** event loop per
+call — while the database engine and the Redis clients are module-level singletons whose
+pooled connections stay bound to the loop that opened them. The first task in a worker
+process succeeded and the second failed with `RuntimeError: got Future attached to a
+different loop`. The pre-M4 tasks hid it by running at most once per fork; scanning runs
+per upload, so the second upload in a worker's lifetime broke.
+
+Two things made it worse than an ordinary bug. It presented as a *database* error, and
+the budget limiter dutifully failed closed on the same exception and logged "budget
+unavailable" — both pointing away from the cause. Fixed with one loop per process
+(`core/async_bridge.py`), created lazily so a fork never inherits its parent's, and
+covered by a subprocess regression test **with a negative control** proving the old
+bridge genuinely fails that way.
+
+**A starved scan displayed "Scanning".** The version was marked `scanning` before the
+budget reservation, so a file waiting for capacity showed a spinner that would not move
+for hours — precisely the dishonesty Design §5 exists to prevent. The reservation now
+comes first, and a budget requeue returns the badge to "queued" unless an analysis
+really is running at VirusTotal.
+
+**The test suite was firing real Celery tasks at the live broker.** `upload_file` drives
+the real upload-complete endpoint, which now enqueues `compute_checksum`, so one run
+pushed 468 tasks into the running worker's queue — rejected there only because that
+worker image predated the task module. On a worker running this code they would have
+executed against versions that exist only in the test database. Now stubbed by an
+autouse fixture that records dispatches instead.
+
+**Login throttling had never been tested.** Leftover rate-limit counters in the shared
+Redis made four unrelated M1 auth tests fail, and chasing that revealed the control
+required by Architecture §4.0 had no test at all since M1. Counters are now cleared per
+test, and throttling is asserted: it engages, it does *not* fire on the first attempt,
+and it stays engaged. An untested security control is a claim, not a control.
+
+**An override released an unscanned file.** Caught by the new tests, not by running:
+`version_is_downloadable` honoured an override on `pending` or `scanning`. The API
+refuses to create one there, so it should be unreachable — but a stray row from a
+migration or a manual edit would have handed out a completely unscanned file, and that
+function is the last thing between a request and the bytes.
+
+Two of my own assertions were wrong rather than the product, and both are worth
+recording. The validation script expected a cold verdict cache on a re-run, when a cache
+hit costing zero requests is the cache working. And it expected a budget-starved scan to
+resume the moment the counter was cleared, when the task had correctly scheduled itself
+for the next UTC midnight — the real recovery path is the sweep, so the script now tests
+that instead of a fiction.
+
+### Open at the end of M4
+
+- **`scan_skipped` is now the common outcome**, not an edge case: with submission off by
+  default, any file VirusTotal has not seen before lands there. This is the deliberate
+  privacy trade in §3b, and it means most genuinely novel content is not virus-checked.
+  The badge says so; a deployment that prefers coverage flips one variable.
+- **Submission mode is verified but not exercised in production.** The path is tested
+  against the live API with self-generated bytes; nothing here has run it with
+  `virustotal_submit_unknown_files=true` under real load, and it costs roughly ten times
+  the budget per file.
+- **A false positive locks the owner out until an override.** Deliberate, with the
+  threshold configurable, but worth stating plainly.
+- **Recovery latency after budget exhaustion is up to ~45 minutes** (a 30-minute stuck
+  threshold plus a 15-minute sweep), in the case where budget frees earlier than the
+  task's own scheduled retry.
+- No notification is sent when a file is flagged. The `scan_flagged` audit entry is
+  written and the notification queue is M6.
