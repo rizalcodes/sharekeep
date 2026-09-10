@@ -25,7 +25,7 @@ from app.schemas.content import (
     FolderUpdate,
     RestoreRequest,
 )
-from app.services import audit, permissions
+from app.services import audit, permissions, scan
 from app.services import folders as folder_service
 
 router = APIRouter(
@@ -108,11 +108,18 @@ async def _listing(db, workspace_id: uuid.UUID, folder: Folder | None, user) -> 
         .order_by(File.name)
     )
     trail = await folder_service.breadcrumb(db, folder_id) if folder_id else []
+    files = list(child_files.scalars().all())
+    # One query for every file's current version, not one per file: the override and
+    # skip reason live on the version, and this is the main browsing path.
+    facts = await scan.presentation_for(db, files)
     return FolderListing(
         folder=FolderOut.model_validate(folder) if folder else None,
         breadcrumb=[BreadcrumbEntry(id=f.id, name=f.name) for f in trail],
         folders=[FolderOut.model_validate(f) for f in child_folders.scalars().all()],
-        files=[FileOut.model_validate(f) for f in child_files.scalars().all()],
+        files=[
+            FileOut(**{**FileOut.model_validate(f).model_dump(), **facts[f.id]})
+            for f in files
+        ],
     )
 
 

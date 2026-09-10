@@ -228,3 +228,54 @@ async def record_override(
     version.scan_override_by = user_id
     version.scan_override_reason = reason
     return version
+
+
+# ------------------------------------------------------------------ presentation ----
+
+
+def _reason_from_detail(detail: dict[str, Any] | None) -> str | None:
+    """The "why" behind a `scan_skipped` badge (Design.md §5).
+
+    The badge is shared by three different situations — scanning switched off, a file
+    above the scanner's size ceiling, and a file the scanner had never seen whose
+    content was deliberately not uploaded. "Not scanned" with no reason invites the
+    reader to assume the most reassuring one.
+    """
+    if not detail:
+        return None
+    reason = detail.get("reason")
+    return reason if isinstance(reason, str) else None
+
+
+async def presentation_for(
+    db: AsyncSession, files: list[File]
+) -> dict[uuid.UUID, dict[str, Any]]:
+    """Scan facts for a set of files, resolved from their current versions.
+
+    One query for every file in the listing rather than one per file: the override and
+    the skip reason live on the version (Schema.md §7 keeps them off `files` so there is
+    a single source of truth), and a listing that fetched them individually would be
+    N+1 on the main browsing path.
+    """
+    version_ids = [f.current_version_id for f in files if f.current_version_id]
+    versions: dict[uuid.UUID, FileVersion] = {}
+    if version_ids:
+        result = await db.execute(
+            select(FileVersion).where(FileVersion.id.in_(version_ids))
+        )
+        versions = {v.id: v for v in result.scalars().all()}
+
+    presentation: dict[uuid.UUID, dict[str, Any]] = {}
+    for file in files:
+        version = versions.get(file.current_version_id) if file.current_version_id else None
+        if version is None:
+            presentation[file.id] = {"is_downloadable": False}
+            continue
+        presentation[file.id] = {
+            "is_downloadable": version_is_downloadable(version),
+            "scan_reason": _reason_from_detail(version.scan_detail),
+            "scan_override_at": version.scan_override_at,
+            "scan_override_by": version.scan_override_by,
+            "scan_override_reason": version.scan_override_reason,
+        }
+    return presentation

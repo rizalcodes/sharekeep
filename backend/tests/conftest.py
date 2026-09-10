@@ -143,6 +143,29 @@ async def new_user(make_client_factory, email: str, **kwargs) -> tuple[httpx.Asy
     return client, response.json()
 
 
+@pytest_asyncio.fixture(loop_scope="session", autouse=True)
+async def clear_login_throttle():
+    """Reset the login throttle counters before each test.
+
+    Found at M4: `core.rate_limit` counts against the real Redis, and those counters
+    outlive a test run. Running the suite a few times in a row therefore made legitimate
+    logins return 429 — four M1 auth tests failing for a reason that had nothing to do
+    with the code under test. The counters were leaking between runs, and between tests.
+
+    A test that wants to prove throttling still can: it generates its own attempts
+    inside the test, from a clean count.
+    """
+    from app.core import rate_limit
+
+    try:
+        client = rate_limit.get_client()
+        keys = [key async for key in client.scan_iter(match="ratelimit:*")]
+        if keys:
+            await client.delete(*keys)
+    except Exception as exc:  # noqa: BLE001 - no Redis is not a reason to fail every test
+        print(f"could not clear login throttle counters: {type(exc).__name__}: {exc}")
+
+
 @pytest.fixture(autouse=True)
 def stub_task_dispatch(monkeypatch, request):
     """Keep the suite out of the real Celery broker.

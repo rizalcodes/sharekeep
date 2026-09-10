@@ -77,6 +77,16 @@ class FileOut(BaseModel):
     mime_type: str
     size_bytes: int
     scan_status: ScanStatus
+    # Resolved server-side (Architecture.md §3): a client re-deriving the access table
+    # could derive it differently from the code that enforces it.
+    is_downloadable: bool = False
+    # Why a "not scanned" badge says what it says. Three different situations share
+    # that badge, and the interface has to distinguish them (Design.md §5).
+    scan_reason: str | None = None
+    # A released file keeps showing that it was flagged, and adds who released it.
+    scan_override_at: datetime | None = None
+    scan_override_by: uuid.UUID | None = None
+    scan_override_reason: str | None = None
     tags: list[str]
     created_by: uuid.UUID
     created_at: datetime

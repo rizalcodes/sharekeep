@@ -71,6 +71,12 @@ async def _load(db, workspace_id: uuid.UUID, file_id: uuid.UUID) -> File:
     return file
 
 
+async def _out(db, file: File) -> FileOut:
+    """FileOut with the scan facts its badge needs (Architecture.md §3, Design.md §5)."""
+    facts = await scan.presentation_for(db, [file])
+    return FileOut(**{**FileOut.model_validate(file).model_dump(), **facts[file.id]})
+
+
 async def _require(db, workspace, user, file: File, role: WorkspaceRole) -> None:
     try:
         await permissions.require_object_role(
@@ -213,7 +219,7 @@ async def upload_complete(
     content_tasks.compute_checksum.delay(str(version.id))
 
     await db.refresh(file)
-    return FileOut.model_validate(file)
+    return await _out(db, file)
 
 
 # --- Read ------------------------------------------------------------------------
@@ -225,7 +231,7 @@ async def get_file(
     workspace, _ = access
     file = await _load(db, workspace.id, file_id)
     await _require(db, workspace, user, file, WorkspaceRole.VIEWER)
-    return FileOut.model_validate(file)
+    return await _out(db, file)
 
 
 @router.get("/files/{file_id}/download", response_model=DownloadResponse)
@@ -405,7 +411,7 @@ async def update_file(
 
     await db.commit()
     await db.refresh(file)
-    return FileOut.model_validate(file)
+    return await _out(db, file)
 
 
 @router.delete("/files/{file_id}", response_model=DeletionReceipt)

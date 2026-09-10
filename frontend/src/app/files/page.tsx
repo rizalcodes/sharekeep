@@ -20,7 +20,7 @@ import {
   startPlan,
   type UploadItem,
 } from "@/lib/upload-manager";
-import { ScanBadge, isDownloadable } from "@/components/scan-badge";
+import { ScanBadge } from "@/components/scan-badge";
 import { UploadQueue } from "@/components/upload-queue";
 
 export default function FilesPage() {
@@ -588,7 +588,7 @@ function Browser({
               key={file.id}
               className="flex items-center gap-3 px-4 py-2.5"
               title={
-                isDownloadable(file.scan_status)
+                file.is_downloadable
                   ? undefined
                   : "This file cannot be downloaded in its current scan state."
               }
@@ -597,7 +597,12 @@ function Browser({
               <span className="min-w-0 flex-1 truncate text-sm text-ink">
                 {file.name}
               </span>
-              <ScanBadge status={file.scan_status} />
+              <ScanBadge
+                status={file.scan_status}
+                reason={file.scan_reason}
+                overriddenAt={file.scan_override_at}
+                overrideReason={file.scan_override_reason}
+              />
               <span className="w-20 shrink-0 text-right font-mono text-xs text-ink-subtle">
                 {formatBytes(file.size_bytes)}
               </span>

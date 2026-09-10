@@ -397,3 +397,50 @@ async def test_completing_an_upload_queues_the_checksum_task(make_client, dispat
     await upload_file(client, ws, "queued.txt")
 
     assert [name for name, _, _ in dispatched_tasks] == ["compute_checksum"]
+
+
+# -------------------------------------------------------------- listing surface ----
+
+
+async def test_the_listing_resolves_downloadability_server_side(make_client, db):
+    """The browser must not have to re-derive the §3 access table."""
+    client, ws = await _workspace(make_client, "m4-listing@example.com")
+    await upload_file(client, ws, "ok.txt")
+    file, version = await _flagged_file(client, ws, db, name="bad.exe")
+
+    listing = (await client.get(f"{WS}/{ws}/folders")).json()
+    by_name = {f["name"]: f for f in listing["files"]}
+
+    assert by_name["ok.txt"]["is_downloadable"] is True
+    assert by_name["bad.exe"]["is_downloadable"] is False
+
+    await client.post(
+        f"{WS}/{ws}/files/{file.id}/versions/{version.id}/scan-override",
+        json={"reason": "Released after review by the workspace owner."},
+    )
+    after = {f["name"]: f for f in (await client.get(f"{WS}/{ws}/folders")).json()["files"]}
+
+    released = after["bad.exe"]
+    assert released["is_downloadable"] is True
+    # Still flagged, and now carrying who released it and why.
+    assert released["scan_status"] == ScanStatus.FLAGGED.value
+    assert released["scan_override_at"] is not None
+    assert released["scan_override_reason"].startswith("Released after review")
+
+
+async def test_a_skipped_scan_carries_its_reason_to_the_listing(make_client, db):
+    """"Not scanned" without a why invites the reader to assume the best case."""
+    client, ws = await _workspace(make_client, "m4-reasoned@example.com")
+    file_id = (await upload_file(client, ws, "unknown.bin")).json()["id"]
+    file = await db.get(File, uuid.UUID(file_id))
+    version = await db.get(FileVersion, file.current_version_id)
+    version.scan_status = ScanStatus.SCAN_SKIPPED
+    version.scan_detail = {"skipped": True, "reason": "not previously seen by the scanner"}
+    await db.flush()
+
+    listing = (await client.get(f"{WS}/{ws}/folders")).json()
+    row = next(f for f in listing["files"] if f["name"] == "unknown.bin")
+
+    assert row["scan_status"] == ScanStatus.SCAN_SKIPPED.value
+    assert row["is_downloadable"] is True
+    assert row["scan_reason"] == "not previously seen by the scanner"

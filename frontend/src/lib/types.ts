@@ -46,6 +46,18 @@ export type FileOut = {
   mime_type: string;
   size_bytes: number;
   scan_status: ScanStatus;
+  /**
+   * Resolved by the server (Architecture.md §3). The client deliberately does not
+   * re-derive the access table: two implementations of one security rule drift, and
+   * the one in the browser is the one that cannot be trusted anyway.
+   */
+  is_downloadable: boolean;
+  /** Why a "not scanned" badge says what it says (Design.md §5). */
+  scan_reason: string | null;
+  /** Present when a workspace owner released the file despite its scan status. */
+  scan_override_at: string | null;
+  scan_override_by: string | null;
+  scan_override_reason: string | null;
   tags: string[];
   created_by: string;
   created_at: string;

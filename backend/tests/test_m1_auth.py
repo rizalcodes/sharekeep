@@ -11,7 +11,7 @@ import pytest
 
 from app.core import security
 from app.core.logging import redact
-from tests.conftest import DEFAULT_PASSWORD, signup
+from tests.conftest import DEFAULT_PASSWORD, new_user, signup
 
 # --- Signup ----------------------------------------------------------------------
 
@@ -260,3 +260,29 @@ async def test_failed_login_audit_records_email_but_not_password(client, db):
     serialised = str([entry.audit_metadata for entry in entries])
     assert "ghost@example.com" in serialised
     assert "a-very-secret-value" not in serialised
+
+
+async def test_login_throttling_actually_engages(make_client):
+    """Architecture.md §4.0 requires login throttling per IP and per email.
+
+    Added at M4. The control had existed since M1 with no test, and the gap surfaced
+    the hard way: leftover counters in a shared Redis made unrelated tests fail, which
+    is how anyone noticed the limiter was never asserted at all. An untested security
+    control is a claim, not a control.
+    """
+    client, _ = await new_user(make_client, "throttle-me@example.com")
+
+    statuses = []
+    for _ in range(12):
+        response = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "throttle-me@example.com", "password": "wrong-password"},
+        )
+        statuses.append(response.status_code)
+
+    assert 429 in statuses, f"never throttled after 12 wrong passwords: {statuses}"
+    # Throttling must arrive after some attempts, not on the first one - a limiter that
+    # blocks immediately would lock users out on a single typo.
+    assert statuses[0] == 401
+    # And once engaged it stays engaged for the window, rather than flapping.
+    assert statuses[-1] == 429
