@@ -21,7 +21,6 @@ import os
 import uuid
 
 import pytest
-from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
@@ -29,6 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 import app.models  # noqa: F401  (registers every mapped class on Base.metadata)
+from alembic import command
 from app.core.config import settings
 from app.models.base import Base
 
@@ -87,13 +87,13 @@ def _significant(diffs: list) -> list:
 
 
 def test_migrations_match_the_models():
-    name = "fileshare_parity_%s" % uuid.uuid4().hex[:8]
+    name = f"fileshare_parity_{uuid.uuid4().hex[:8]}"
     url = _server_url() + "/" + name
 
     try:
-        asyncio.run(_run_on_server(['CREATE DATABASE "%s"' % name]))
+        asyncio.run(_run_on_server([f'CREATE DATABASE "{name}"']))
     except Exception as exc:  # pragma: no cover - infrastructure, not logic
-        pytest.skip("cannot create a scratch database for the parity check: %s" % exc)
+        pytest.skip(f"cannot create a scratch database for the parity check: {exc}")
 
     original = settings.database_url
     try:
@@ -109,9 +109,11 @@ def test_migrations_match_the_models():
         asyncio.run(
             _run_on_server(
                 [
-                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-                    "WHERE datname = '%s' AND pid <> pg_backend_pid()" % name,
-                    'DROP DATABASE IF EXISTS "%s"' % name,
+                    # noqa justified: `name` is a uuid4 hex string this function
+                    # generated, and Postgres accepts no bind parameters in DDL.
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "  # noqa: S608
+                    f"WHERE datname = '{name}' AND pid <> pg_backend_pid()",
+                    f'DROP DATABASE IF EXISTS "{name}"',
                 ]
             )
         )

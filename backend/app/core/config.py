@@ -110,6 +110,13 @@ class Settings(BaseSettings):
     # enabling this publishes a user's private file to a public analysis pool. Off means
     # unknown files are marked scan_skipped with that reason (Architecture.md §3b).
     virustotal_submit_unknown_files: bool = False
+    # How many engines must call a file malicious before it is flagged. 1 means a single
+    # engine is enough to withhold the file. That will sometimes be a false positive,
+    # and the cost is real — a flagged file is unreachable even by its owner — but the
+    # remedy is the accountable admin override (Architecture.md §3d), not a laxer
+    # default that serves malware because only one scanner noticed. `suspicious` counts
+    # are recorded and never flag on their own: a hedge is not a conviction.
+    virustotal_malicious_threshold: int = 1
     # Only consulted when submission is enabled: how long to wait for an analysis verdict.
     virustotal_analysis_poll_attempts: int = 10
     virustotal_analysis_poll_interval_seconds: int = 15
