@@ -55,8 +55,24 @@ class ScanStatus(enum.StrEnum):
     SCAN_FAILED = "scan_failed"
 
     @property
-    def is_downloadable(self) -> bool:
+    def allows_download_without_override(self) -> bool:
+        """Whether this status alone permits serving bytes (Architecture.md §3).
+
+        Not the full rule. Since M4 an admin override recorded on a version can also
+        permit a download, so a caller deciding whether to issue a URL must use
+        `scan.version_is_downloadable`, which considers both. This property exists for
+        that function and for tests of the status table itself.
+        """
         return self in (ScanStatus.CLEAN, ScanStatus.SCAN_SKIPPED)
+
+    @property
+    def is_overridable(self) -> bool:
+        """Whether an admin may release a version in this state (Architecture.md §3d).
+
+        Only the two dead-end states. Overriding `pending` or `scanning` would race the
+        scan that is about to answer, and overriding a downloadable state is a no-op.
+        """
+        return self in (ScanStatus.FLAGGED, ScanStatus.SCAN_FAILED)
 
 
 class AuditAction(enum.StrEnum):
@@ -84,6 +100,9 @@ class AuditAction(enum.StrEnum):
     INVITATION_ACCEPTED = "invitation_accepted"
     INVITATION_REVOKED = "invitation_revoked"
     SCAN_FLAGGED = "scan_flagged"
+    # Added at M4. Releasing a file the scanner flagged is exactly the kind of act an
+    # audit log exists for, so this one is not optional (Architecture.md §3d).
+    SCAN_OVERRIDE = "scan_override"
     QUOTA_EXCEEDED = "quota_exceeded"
 
 

@@ -172,6 +172,16 @@ class FileVersion(UUIDPrimaryKeyMixin, CreatedAtMixin, SoftDeleteBatchMixin, Bas
         server_default=ScanStatus.PENDING.value,
     )
     scan_detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Admin override (Schema.md §7, Architecture.md §3d). Recorded BESIDE scan_status,
+    # never over it: `flagged` stays `flagged`, because nothing re-scanned the file and
+    # writing `clean` here would fabricate a verdict no scanner gave.
+    scan_override_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    scan_override_by: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=True
+    )
+    scan_override_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     # In-flight multipart state (Schema.md §7). Present between upload-init and
     # upload-complete; also what the abandoned-upload sweep aborts.
     upload_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
@@ -191,6 +201,15 @@ class FileVersion(UUIDPrimaryKeyMixin, CreatedAtMixin, SoftDeleteBatchMixin, Bas
             "upload_started_at",
             postgresql_where=text("upload_id IS NOT NULL"),
         ),
+        # An override is all three fields or none. A half-written override would leave
+        # access granted with nobody accountable for granting it.
+        CheckConstraint(
+            "num_nonnulls(scan_override_at, scan_override_by, scan_override_reason) IN (0, 3)",
+            name="override_all_or_nothing",
+        ),
+        # The scan worker looks up verdicts by content hash (Architecture.md §3c) and
+        # the stuck-scan sweep looks up unresolved versions by status.
+        Index("ix_file_versions_checksum_sha256", "checksum_sha256"),
     )
 
     @property
@@ -232,4 +251,39 @@ class FilePermission(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint("file_id", "user_id", name="uq_file_permissions_file_id_user_id"),
         UniqueConstraint("folder_id", "user_id", name="uq_file_permissions_folder_id_user_id"),
         Index("ix_file_permissions_user_id", "user_id"),
+    )
+
+
+class ScanResult(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Verdict cache keyed on file content (Schema.md §12a, Architecture.md §3c).
+
+    VirusTotal's free tier allows roughly 500 requests a day, so asking again about
+    content we have already asked about is the easiest way to waste that budget: two
+    users uploading the same PDF should cost one request, not two.
+
+    Deliberately holds no workspace or user reference. A hash verdict is a fact about
+    file content, not about who uploaded it, and scoping it per workspace would multiply
+    requests for no benefit. It is worker-internal and must never be served through a
+    workspace-scoped API — there is nothing in here to isolate, and nothing that should
+    let one tenant learn what another has stored.
+    """
+
+    __tablename__ = "scan_results"
+
+    checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Only settled verdicts are cached. Caching `pending` or `scan_failed` would serve a
+    # non-answer back as though it were an answer.
+    verdict: Mapped[ScanStatus] = mapped_column(
+        _pg_enum(ScanStatus, "scan_status"), nullable=False
+    )
+    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("checksum_sha256", name="uq_scan_results_checksum_sha256"),
+        # A verdict is either clean or flagged; the transient states have no place here.
+        CheckConstraint(
+            "verdict IN ('clean', 'flagged')",
+            name="settled_verdicts_only",
+        ),
     )
