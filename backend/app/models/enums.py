@@ -75,6 +75,23 @@ class ScanStatus(enum.StrEnum):
         return self in (ScanStatus.FLAGGED, ScanStatus.SCAN_FAILED)
 
 
+class ShareLinkType(enum.StrEnum):
+    """A share link's PRIMARY access rule (Schema.md §9).
+
+    Not a description of everything the link enforces. `expires_at`,
+    `hashed_password` and `max_downloads` are independent modifiers valid on any type,
+    so a `public` link can also expire and an `expiring` link can also need a password.
+    Reading this enum as the complete rule is the mistake Schema §9 v1.1 was written to
+    correct, which is why resolution never branches on the type alone.
+    """
+
+    PUBLIC = "public"
+    PRIVATE = "private"
+    # noqa justified: this is an enum member naming a link type, not a credential.
+    PASSWORD_PROTECTED = "password_protected"  # noqa: S105
+    EXPIRING = "expiring"
+
+
 class AuditAction(enum.StrEnum):
     """Schema.md §10. Only the M1 subset is exercised so far; the rest land with their
     milestones. The enum is created in full so later milestones need no migration."""

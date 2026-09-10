@@ -130,8 +130,23 @@ def exceeds_provider_file_limit(size_bytes: int) -> bool:
     return size_bytes > settings.max_file_size_bytes
 
 
-def generate_download_url(storage_key: str, *, download_filename: str | None = None) -> str:
-    """Short-lived, download-only signed URL (Architecture.md §9)."""
+def generate_download_url(
+    storage_key: str,
+    *,
+    download_filename: str | None = None,
+    ttl_seconds: int | None = None,
+) -> str:
+    """Short-lived, download-only signed URL (Architecture.md §9).
+
+    `ttl_seconds` overrides the default for share links, which use a shorter lifetime
+    because an issued URL cannot be recalled and the TTL is therefore the window in
+    which a revoked link still works (Architecture.md §4.3).
+
+    Verified against the live bucket: Supabase honours `ResponseContentDisposition`, so
+    the attachment header genuinely forces a download; a `PUT` against the returned URL
+    is refused with 403, so the signature really is GET-scoped; and an expired signature
+    is refused with HTTP 400 rather than 403.
+    """
     params: dict[str, Any] = {
         "Bucket": settings.supabase_storage_bucket,
         "Key": storage_key,
@@ -143,7 +158,7 @@ def generate_download_url(storage_key: str, *, download_filename: str | None = N
         return get_storage_client().generate_presigned_url(
             "get_object",
             Params=params,
-            ExpiresIn=settings.signed_download_url_ttl_seconds,
+            ExpiresIn=ttl_seconds or settings.signed_download_url_ttl_seconds,
         )
     except (BotoCoreError, ClientError) as exc:
         raise StorageError("failed to generate download URL") from exc

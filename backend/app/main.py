@@ -11,7 +11,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import engine
 from app.core.logging import configure_logging
-from app.routers import auth, files, folders, health, invitations, workspaces
+from app.routers import (
+    auth,
+    files,
+    folders,
+    health,
+    invitations,
+    shares,  # noqa: F401
+    workspaces,
+)
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -69,3 +77,7 @@ app.include_router(workspaces.router)
 app.include_router(invitations.router)
 app.include_router(folders.router)
 app.include_router(files.router)
+app.include_router(shares.owner_router)
+# The only unauthenticated route to file content. Registered last so its very short
+# prefix cannot shadow a workspace-scoped path (Architecture.md §4.2).
+app.include_router(shares.public_router)

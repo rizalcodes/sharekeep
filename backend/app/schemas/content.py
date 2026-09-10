@@ -7,7 +7,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
-from app.models.enums import ScanStatus, WorkspaceRole
+from app.models.enums import ScanStatus, ShareLinkType, WorkspaceRole
 
 
 def _clean_name(value: str) -> str:
@@ -272,3 +272,82 @@ class ResumeState(BaseModel):
     remaining_parts: list[UploadPart]
     layout: list[PartLayout]
     uploaded_bytes: int
+
+# --- Share links (Architecture.md §4.2, added at M5) -----------------------------
+
+
+class ShareLinkCreate(BaseModel):
+    """The type is the primary rule; the rest are modifiers valid on any type.
+
+    Deliberately not modelled as four mutually exclusive shapes — that reading is what
+    Schema.md §9 v1.1 exists to correct, and it would make "password-protected and
+    expiring" impossible to express.
+    """
+
+    link_type: ShareLinkType
+    password: str | None = Field(default=None, min_length=8, max_length=128)
+    expires_at: datetime | None = None
+    max_downloads: int | None = Field(default=None, ge=1)
+    # For a private link. Taken as an email so the sharer names a person, not a UUID.
+    allowed_user_email: EmailStr | None = None
+
+
+class ShareLinkOut(BaseModel):
+    """A link as its owner sees it. Never carries the token — it is not stored."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    file_id: uuid.UUID
+    link_type: ShareLinkType
+    has_password: bool = False
+    allowed_user_id: uuid.UUID | None = None
+    expires_at: datetime | None = None
+    max_downloads: int | None = None
+    # Named for what it counts: link redemptions, not completed downloads
+    # (Architecture.md §4.2). The API never sees the bytes.
+    uses: int = 0
+    revoked_at: datetime | None = None
+    is_active: bool = True
+    created_by: uuid.UUID
+    created_at: datetime
+
+
+class ShareLinkCreated(ShareLinkOut):
+    """The one and only response that contains the raw token.
+
+    Tokens are stored hashed, so this value cannot be produced again for this link.
+    """
+
+    token: str
+    url_path: str
+
+
+class SharePreview(BaseModel):
+    """What a visitor is told before redeeming a link.
+
+    Deliberately minimal while a gate remains. The file name is withheld until a
+    required password has been supplied: sending the link and the password through
+    separate channels is the whole point of password protection, so someone holding only
+    the link should not learn what the file is called.
+    """
+
+    requires_password: bool
+    requires_sign_in: bool
+    expires_at: datetime | None = None
+    # Populated only once nothing is left to satisfy.
+    file_name: str | None = None
+    size_bytes: int | None = None
+
+
+class ShareDownloadRequest(BaseModel):
+    password: str | None = None
+
+
+class ShareDownloadResponse(BaseModel):
+    url: str
+    expires_in_seconds: int
+    file_name: str
+    size_bytes: int
+    # Stated so a client can show it: what remains after this use, if there is a limit.
+    uses_remaining: int | None = None

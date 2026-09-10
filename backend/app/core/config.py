@@ -86,6 +86,11 @@ class Settings(BaseSettings):
 
     # Signed URLs are short-lived and single-purpose (Architecture.md §9).
     signed_download_url_ttl_seconds: int = 300
+    # Shorter than the authenticated download TTL, deliberately (Architecture.md §4.3).
+    # Once a signed URL has been handed to a share recipient, revoking the link cannot
+    # recall it, so this value IS the revocation window. Shortening it costs almost
+    # nothing because the TTL governs when a transfer must start, not how long it runs.
+    signed_share_url_ttl_seconds: int = 60
     # A single multipart part upload may legitimately take longer than a download.
     signed_upload_url_ttl_seconds: int = 3600
     multipart_chunk_size_bytes: int = 8 * 1024 * 1024
@@ -135,6 +140,14 @@ class Settings(BaseSettings):
     # --- Resend ---
     resend_api_key: SecretStr | None = None
     resend_from_email: str = "noreply@example.com"
+
+    # --- Share links (Architecture.md §4.4) ---
+    # Per-IP ceiling on token resolution attempts: an unguessable token is only
+    # unguessable if you cannot try millions of them.
+    share_attempts_per_ip_per_minute: int = 30
+    # Password attempts are throttled per LINK as well, so one link under attack cannot
+    # be brute-forced, and cannot burn an unrelated visitor's IP budget either.
+    share_password_attempts_per_link_per_minute: int = 5
 
     # --- Quotas ---
     default_storage_quota_bytes: int = DEFAULT_STORAGE_QUOTA_BYTES

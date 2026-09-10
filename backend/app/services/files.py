@@ -318,6 +318,21 @@ async def restore(
     return len(files)
 
 
+async def current_version(db: AsyncSession, file: File) -> FileVersion | None:
+    """The live version a file points at, or None if it has no completed upload.
+
+    Extracted at M5 because three callers now need it — download, share creation and
+    share resolution — and each one deciding for itself what "current" means is how the
+    access rule quietly forks.
+    """
+    if file.current_version_id is None:
+        return None
+    version = await db.get(FileVersion, file.current_version_id)
+    if version is None or version.deleted_at is not None:
+        return None
+    return version
+
+
 async def download_url(db: AsyncSession, file: File) -> str:
     """A short-lived signed URL, but only if the scan result permits it.
 
@@ -327,10 +342,8 @@ async def download_url(db: AsyncSession, file: File) -> str:
     would refuse, and the override deliberately lives only on the version so there is
     one place that says whether access was granted (Schema.md §7).
     """
-    if file.current_version_id is None:
-        raise FileError("This file has no completed upload yet.")
-    version = await db.get(FileVersion, file.current_version_id)
-    if version is None or version.deleted_at is not None:
+    version = await current_version(db, file)
+    if version is None:
         raise FileError("This file has no completed upload yet.")
     if not scan.version_is_downloadable(version):
         raise FileError(scan.download_refusal_reason(version))

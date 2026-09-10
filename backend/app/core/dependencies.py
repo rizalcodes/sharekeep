@@ -46,7 +46,29 @@ async def get_current_user(
     return user
 
 
+async def get_optional_user(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> User | None:
+    """The signed-in user if there is one, otherwise None.
+
+    Share links need this: a `private` link requires an identified user, while the other
+    three types must work for someone with no account at all (Architecture.md §4.2). A
+    bad or expired cookie resolves to None rather than raising, because on this path not
+    being signed in is a legitimate state, not an error.
+    """
+    token = request.cookies.get(security.ACCESS_COOKIE_NAME)
+    if not token:
+        return None
+    try:
+        user_id = security.decode_access_token(token)
+    except security.TokenError:
+        return None
+    return await db.get(User, user_id)
+
+
 CurrentUser = Annotated[User, Depends(get_current_user)]
+OptionalUser = Annotated[User | None, Depends(get_optional_user)]
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 

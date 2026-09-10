@@ -240,6 +240,22 @@ def stub_storage(monkeypatch):
     def abort_multipart_upload(storage_key, upload_id):
         uploads.pop(upload_id, None)
 
+    # Every signed URL this stub issues, so a test can assert the TTL that was asked
+    # for. Mirrors the real signature exactly, including `ttl_seconds` — a stub that
+    # accepts fewer arguments than the function it replaces turns a real TypeError into
+    # a passing suite, which is precisely how M3 shipped a KeyError.
+    issued_urls: list[dict] = []
+
+    def generate_download_url(storage_key, *, download_filename=None, ttl_seconds=None):
+        issued_urls.append(
+            {
+                "storage_key": storage_key,
+                "download_filename": download_filename,
+                "ttl_seconds": ttl_seconds,
+            }
+        )
+        return f"https://storage.test/{storage_key}?signed=1"
+
     from app.services import storage as storage_module
 
     monkeypatch.setattr(storage_module, "create_multipart_upload", create_multipart_upload)
@@ -260,9 +276,13 @@ def stub_storage(monkeypatch):
     monkeypatch.setattr(
         storage_module,
         "generate_download_url",
-        lambda key, download_filename=None: f"https://storage.test/{key}?signed=1",
+        generate_download_url,
     )
-    return {"uploads": uploads, "landed_parts": landed_parts}
+    return {
+        "uploads": uploads,
+        "landed_parts": landed_parts,
+        "download_urls": issued_urls,
+    }
 
 
 async def upload_file(

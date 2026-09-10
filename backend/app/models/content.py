@@ -30,7 +30,7 @@ from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, CreatedAtMixin, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.enums import ScanStatus, WorkspaceRole
+from app.models.enums import ScanStatus, ShareLinkType, WorkspaceRole
 
 
 def _pg_enum(enum_cls: type, name: str) -> SAEnum:
@@ -287,3 +287,75 @@ class ScanResult(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="settled_verdicts_only",
         ),
     )
+
+
+class ShareLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """A file shared outside the workspace (Schema.md §9, Architecture.md §4.2).
+
+    Two properties of this table carry most of its security weight.
+
+    **The token is stored hashed.** `token_hash` is SHA-256 of 48 bytes of CSPRNG
+    output; the raw token is returned once at creation and never persisted (Rules.md
+    §3). A leaked database, backup, or read-only injection therefore yields no working
+    link. The visible cost is that a link cannot be re-displayed later — deliberate, and
+    surfaced in the UI at creation rather than discovered afterwards.
+
+    **`link_type` is the primary rule, not the whole rule.** `hashed_password`,
+    `expires_at` and `max_downloads` are independent modifiers valid on any type, which
+    is what makes "password-protected and expiring" representable. Resolution never
+    branches on the type alone.
+    """
+
+    __tablename__ = "share_links"
+
+    file_id: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("files.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    link_type: Mapped[ShareLinkType] = mapped_column(
+        _pg_enum(ShareLinkType, "share_link_type"), nullable=False
+    )
+    hashed_password: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    allowed_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    max_downloads: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Counts resolutions, not completed downloads: the bytes never pass through the API,
+    # so a finished download is not an event this system can observe (Schema.md §9).
+    download_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    file: Mapped[File] = relationship(foreign_keys=[file_id])
+
+    __table_args__ = (
+        UniqueConstraint("token_hash", name="uq_share_links_token_hash"),
+        Index("ix_share_links_file_id", "file_id"),
+        # The three type requirements from Schema.md §9. Deliberately requirements only:
+        # a `public` link may still carry a password or an expiry, and forbidding that
+        # would restore the single-enum reading v1.1 exists to correct.
+        CheckConstraint(
+            "(link_type <> 'password_protected' OR hashed_password IS NOT NULL) "
+            "AND (link_type <> 'expiring' OR expires_at IS NOT NULL) "
+            "AND (link_type <> 'private' OR allowed_user_id IS NOT NULL)",
+            name="type_requirements",
+        ),
+        # A link that can never be used is a mistake at creation, not a state to store.
+        CheckConstraint(
+            "max_downloads IS NULL OR max_downloads > 0",
+            name="usable_download_limit",
+        ),
+    )
+
+    @property
+    def is_revoked(self) -> bool:
+        return self.revoked_at is not None

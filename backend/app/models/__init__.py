@@ -18,6 +18,7 @@ from app.models.content import (
     FileVersion,
     Folder,
     ScanResult,
+    ShareLink,
     SoftDeleteBatchMixin,
 )
 from app.models.enums import (
@@ -25,6 +26,7 @@ from app.models.enums import (
     AuditTargetType,
     InvitationStatus,
     ScanStatus,
+    ShareLinkType,
     WorkspaceRole,
 )
 from app.models.identity import (
@@ -50,6 +52,8 @@ __all__ = [
     "RefreshToken",
     "ScanResult",
     "ScanStatus",
+    "ShareLink",
+    "ShareLinkType",
     "SoftDeleteBatchMixin",
     "SoftDeleteMixin",
     "TimestampMixin",
