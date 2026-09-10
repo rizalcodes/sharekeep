@@ -41,10 +41,18 @@ class OverrideNotPermitted(ScanError):
 
 
 def version_is_downloadable(version: FileVersion) -> bool:
-    """The whole access rule, in one place."""
+    """The whole access rule, in one place.
+
+    An override releases only the states it is *permitted* to release. `record_override`
+    already refuses to create one on `pending` or `scanning`, so an override sitting on
+    an unresolved scan should be impossible — but the access rule must not depend on
+    that being true. A stray override row from a migration, a manual edit, or some later
+    code path would otherwise hand out an unscanned file, and this is the one function
+    standing between a request and the bytes.
+    """
     if version.scan_status.allows_download_without_override:
         return True
-    return has_override(version)
+    return version.scan_status.is_overridable and has_override(version)
 
 
 def has_override(version: FileVersion) -> bool:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncGenerator
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -140,6 +141,47 @@ async def new_user(make_client_factory, email: str, **kwargs) -> tuple[httpx.Asy
     response = await signup(client, email, **kwargs)
     assert response.status_code == 201, response.text
     return client, response.json()
+
+
+@pytest.fixture(autouse=True)
+def stub_task_dispatch(monkeypatch, request):
+    """Keep the suite out of the real Celery broker.
+
+    Added at M4, after a defect: `upload_file` drives the real upload-complete endpoint,
+    which enqueues `compute_checksum`. With a broker URL configured, the suite pushed a
+    task per uploaded file into the live queue — 468 of them in one run — where the
+    running worker rejected each as an unregistered task. Nothing corrupted, but the
+    tests were reaching outside themselves, and on a worker running this code they would
+    have been executed against versions that exist only in the test database.
+
+    Dispatched tasks are recorded so a test can assert the enqueue happened, which is
+    the part worth asserting; whether Celery can deliver it is Celery's business.
+    """
+    dispatched: list[tuple[str, tuple, dict]] = []
+
+    def record(name):
+        def delay(*args, **kwargs):
+            dispatched.append((name, args, kwargs))
+            return SimpleNamespace(id="test-task-id")
+
+        return delay
+
+    from app.tasks import content_tasks, scan_tasks
+
+    monkeypatch.setattr(
+        content_tasks.compute_checksum, "delay", record("compute_checksum")
+    )
+    monkeypatch.setattr(
+        scan_tasks.scan_file_version, "delay", record("scan_file_version")
+    )
+    request.node.dispatched_tasks = dispatched
+    return dispatched
+
+
+@pytest.fixture
+def dispatched_tasks(stub_task_dispatch):
+    """The tasks a test caused to be enqueued, in order."""
+    return stub_task_dispatch
 
 
 @pytest.fixture(autouse=True)
