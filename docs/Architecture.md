@@ -2,7 +2,7 @@
 
 **Scope note:** system/service design — how components interact, the background job pipeline, security architecture. Not data structure (`Schema.md`) or naming/conventions (`Rules.md`).
 
-**Version:** v1.6 — frontend build-time configuration corrected after M3, 9 September 2026 (see §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
+**Version:** v1.7 — scan pipeline reworked at the start of M4, 10 September 2026 (see §16). Previously v1.6 (frontend build-time configuration, §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
 
 ---
 
@@ -42,34 +42,81 @@ Both endpoints resolve access through the same permission path as everything els
 
 ## 3. Malware Scan Pipeline (Celery)
 
-**The constraint that shapes this design:** the VirusTotal API caps direct file submission at 32MB (32–650MB requires a separate upload-URL endpoint; above 650MB submission is impossible), the free tier allows roughly 4 requests/minute and 500/day, and **free-tier submissions are shared with the VirusTotal community**. Sending a customer's file content to a public analysis pool is a poor property for a product named "secure file sharing." Both facts push the same direction: look up by hash first, upload bytes only when there is no other option.
+**The constraints that shape this design:** the VirusTotal API caps direct file submission at 32MB (32–650MB requires a separate upload-URL endpoint; above 650MB submission is impossible), the free tier allows roughly 4 requests/minute and 500/day, and **free-tier submissions are shared with the VirusTotal community**. Sending a customer's file content to a public analysis pool is a poor property for a product named "secure file sharing", so the default is to look up by hash and **never** upload file content — see §3b.
 
-`scan_tasks.scan_file_version(file_version_id)` — triggered on upload completion:
+Two separate concerns, deliberately two separate tasks (amended v1.7, see §16):
 
-1. Stream the object from storage and compute its SHA-256; store it in `file_versions.checksum_sha256`. This doubles as the integrity checksum.
-2. Set `scan_status = scanning`.
-3. **Hash lookup first:** `GET /files/{sha256}`. This costs one rate-limited request, sends **no file content** to VirusTotal, and resolves the large majority of real-world uploads (any file VT has seen before). A hit returns the full engine verdict → go to step 6.
-4. **On a miss (VT has never seen this file):**
-   - `size <= 32MB` → submit the bytes via `POST /files`, poll the analysis, then verdict.
-   - `32MB < size <= 650MB` → obtain a large-file upload URL via `GET /files/upload_url`, submit, poll, verdict.
-   - `size > 650MB` → **`scan_status = scan_skipped`**, with the reason recorded in `scan_detail`. The file is served, but carries a permanent, visible "not scanned" badge in the UI (Design.md §5 — the scan badge is a core trust signal and must tell the truth, including when the truth is "we could not check this").
-5. All VirusTotal calls pass through a **proactive client-side rate limiter** (Rules.md §3) — a token bucket in Redis sized to the free tier's per-minute and per-day budgets. Tasks block on the limiter rather than firing and handling 429s.
-6. On a verdict: update `file_versions.scan_status` and, if this is the current version, `files.scan_status` → `clean` or `flagged`. Engine hit summary into `scan_detail`.
-7. If `flagged`: the file is **not** deleted automatically (same "don't auto-delete on an uncertain signal" principle used in the n8n project's stale-SKU handling) — it is marked flagged, all access is blocked pending owner/workspace-admin review, an `audit_logs` entry (`scan_flagged`) is written, and a notification is queued.
-8. If the scan itself fails (API error, timeout): `scan_status = scan_failed`, retried with exponential backoff (Celery's built-in retry). After retries are exhausted the file remains inaccessible until a successful scan or an explicit admin override.
-9. On success, if this version replaces a prior current version, the task chains into version-processing: update `files.current_version_id`, `files.size_bytes`, `files.mime_type`.
+- `content_tasks.compute_checksum(file_version_id)` — runs on every completed upload, whether or not scanning is enabled. Streams the object from storage in fixed-size chunks (never loading the whole object into worker memory) and stores the SHA-256 in `file_versions.checksum_sha256`. This is an **integrity** feature and does not belong behind the scanning flag: tying it to scanning meant that with `scanning_enabled=false` no checksum was ever computed at all.
+- `scan_tasks.scan_file_version(file_version_id)` — enqueued by the above when scanning is enabled.
 
-**Access rule by scan status** (this is the single source of truth for whether bytes may be served):
+### The scan task
+
+1. Read `checksum_sha256` (guaranteed present — the checksum task is its predecessor). Set `scan_status = scanning`.
+2. **Local verdict cache first (§3c).** If a fresh verdict for this SHA-256 already exists, use it. This costs **zero** VirusTotal requests and is the main defence for a 500/day budget.
+3. **Reserve budget from the rate limiter (§3a).** No VirusTotal call is ever made without a reservation. If no budget is available the task is requeued, not blocked.
+4. **Hash lookup:** `GET /files/{sha256}`. One request, **no file content transmitted**, and it resolves any file VirusTotal has seen before. A hit returns the full engine verdict → step 6.
+5. **On a miss** (VirusTotal has never seen this file), behaviour depends on `virustotal_submit_unknown_files` (default **false**, see §3b):
+   - **Submission disabled (default):** `scan_status = scan_skipped`, reason recorded in `scan_detail`. No bytes leave our infrastructure.
+   - **Submission enabled**, `size <= 32MB` → submit via `POST /files`, poll the analysis, then verdict.
+   - **Submission enabled**, `32MB < size <= 650MB` → obtain a large-file upload URL via `GET /files/upload_url`, submit, poll, verdict. *Reachable today: the 50MB per-file ceiling (PRD §10) sits above 32MB, so this branch is live and must be tested — only the >650MB branch is currently unreachable.*
+   - `size > 650MB` → `scan_status = scan_skipped`, reason recorded.
+6. On a verdict: write `file_versions.scan_status` and, if this is the current version, `files.scan_status` → `clean` or `flagged`. Engine hit summary into `scan_detail`, and the verdict into the cache (§3c).
+7. If `flagged`: the file is **not** deleted automatically (same "don't auto-delete on an uncertain signal" principle used in the n8n project's stale-SKU handling). It is marked flagged, all access is blocked, an `audit_logs` entry (`scan_flagged`) is written, and a notification is queued. The only exit is an explicit admin override — §3d.
+8. If the scan itself fails (API error, timeout): `scan_status = scan_failed`, retried with exponential backoff. After retries are exhausted the version stays inaccessible until a later successful scan or an admin override (§3d). **A rate-limit requeue is not a failure** and does not consume this retry budget (§3a).
+
+**Version bookkeeping.** Earlier drafts had the scan task "chain into version processing" to set `files.current_version_id`, `size_bytes` and `mime_type`. It does not: `complete_upload` sets those synchronously the moment the upload finishes (M2), long before any scan runs. A file therefore becomes *visible* immediately and becomes *downloadable* only when its scan status allows — which is the intended behaviour, and is why the two were separated. The scan task writes scan fields only.
+
+### 3a. Rate limiting and budget (outbound)
+
+Distinct from the inbound, per-IP throttling of share links in §4.4. This governs **our own consumption of one third-party API** using a single key that we hold.
+
+Two fixed windows in **Redis**, each read-and-incremented atomically so two workers cannot both see the last remaining token: a per-minute window with a native TTL, and a per-day window. Sized from `virustotal_requests_per_minute` and `virustotal_requests_per_day`, which are configuration, not database rows — VirusTotal sets these limits, we do not, so a table whose stated purpose is "change limits without a redeploy" would only let us change a number we cannot control.
+
+**Reserve-or-requeue, never block.** A worker thread must never sleep waiting for budget. When no token is available the task is re-queued with a countdown until the window reopens, plus jitter so that a burst of uploads does not stampede the moment it does. Blocking was the original wording and it does not survive contact with the daily window: at `concurrency=2`, two tasks blocking on an exhausted daily budget would deadlock the entire scan pipeline for up to 24 hours.
+
+**When the daily budget is exhausted, a file stays `pending`** — it is not downloadable, and it is not quietly promoted to `scan_skipped`. Promoting it would turn budget exhaustion into a scanning bypass that anyone can trigger on purpose: upload enough junk to burn the day's budget, then upload the payload and have it served unscanned. The cost of the honest choice is that a file uploaded after the budget runs out waits for the next window, so the UI must show a distinct "queued for scanning" state rather than an indefinite spinner (Design.md §5).
+
+Redis is the right home for these counters, and not merely because it is already deployed: the increment-and-check must be atomic, the per-minute window must expire on its own (a Postgres counter table would need a sweeper task purely to delete rows), and the data is **disposable** — losing a rate counter costs at worst a few extra requests and one 429, unlike losing a quota row. There is also no failure mode in which the limiter is unavailable while scans still run: Redis is the Celery broker, so if Redis is down no scan task is delivered at all.
+
+**No generic API call-log table.** `file_versions.scan_detail` already records the analysis id and outcome per version, which answers "why did this file's scan behave this way". A separate log of every outbound call would duplicate that for analytics the PRD does not ask for, and — the lesson from the n8n project's Gemini incident — what actually prevents a quota from burning silently is a counter that *refuses* the call, not a log written after the fact. Current window consumption is exposed on the existing `/status` surface.
+
+**Re-driving stuck work.** A worker killed mid-scan leaves a version in `scanning` with nothing scheduled. A beat task re-drives versions left in `pending` or `scanning` past a threshold, which also covers tasks lost to a requeue that never came back.
+
+### 3b. File content is not submitted by default
+
+`virustotal_submit_unknown_files` defaults to **false**. On a hash miss the file is marked `scan_skipped` with the reason "not previously seen by the scanner; content not submitted", and no bytes leave our infrastructure.
+
+This is a deliberate trade and the cost is real: files VirusTotal has never seen — which includes most genuinely private documents — are never actually scanned, and their badge says so. The alternative, enabled by the flag, gives far broader coverage but publishes a customer's private file to a public analysis pool on the free tier. For a product whose name promises the opposite, the default belongs on the side of not transmitting content; deployments that would rather have coverage can flip one variable.
+
+**Knock-on:** this makes `scan_skipped` a common, reachable state again. PRD §10 recorded it as temporarily unreachable because the 50MB ceiling sits far below VirusTotal's 650MB submission limit; that reasoning covered only the size route to `scan_skipped`, and the hash-miss route is now the usual one.
+
+### 3c. Verdict cache (`scan_results`)
+
+Keyed on SHA-256. A verdict already known for a hash is reused without spending a request, so two users uploading the same PDF, or the same file re-uploaded after an edit-and-revert, cost nothing. With a 500/day budget this is the single largest saving available, and it is why the table exists rather than the checksum being looked up against `file_versions`: version rows are pruned by the 10-version retention cap and hard-deleted with their files, so they cannot be relied on as a cache.
+
+Verdicts age — a file clean today may be flagged next month — so an entry older than `scan_cache_ttl_days` (default 30) is treated as absent and re-looked-up. Schema in `Schema.md` §12a.
+
+### 3d. Flagged files and admin override
+
+Without an exit, `flagged` and an exhausted-retry `scan_failed` are permanent dead ends: the file is inaccessible to everyone, including its owner, forever. A workspace owner or admin may therefore override a specific version.
+
+**The override does not rewrite history.** `scan_status` stays `flagged` or `scan_failed`; the override is recorded separately (`scan_override_at`, `scan_override_by`, `scan_override_reason` — Schema.md §7) and is what grants access. Setting the status to `clean` instead would be a lie: nothing re-scanned the file and nothing pronounced it safe. The UI must keep showing that the file was flagged **and** that a named person chose to release it.
+
+Every override is written to `audit_logs` with the new `scan_override` action, including who, when, and the stated reason. An override applies to one version only — it does not carry to a later upload of the same file.
+
+**Access rule by scan status** (the single source of truth for whether bytes may be served):
 
 | `scan_status` | Downloadable? |
 |---|---|
-| `pending`, `scanning` | No — the UI shows the file with a scanning badge, but no download URL is issued |
+| `pending`, `scanning` | No — the UI shows the file with a scanning or "queued for scanning" badge, but no download URL is issued |
 | `clean` | Yes |
 | `scan_skipped` | Yes, with a persistent "not scanned" badge |
-| `flagged` | **Never**, including to the owner, until an explicit admin review clears it |
-| `scan_failed` | No, until a retry succeeds or an admin overrides |
+| `flagged` | **No** — including to the owner — unless an admin override is recorded on that version (§3d) |
+| `scan_failed` | No, until a retry succeeds or an admin override is recorded |
 
-**Version rollback interaction:** rolling back to an older version is permitted only if that target version's own `scan_status` allows access under the table above. A flagged current version does not block rollback to a clean earlier one — that is precisely the recovery path.
+Because two of these rows now depend on the override record and not on the enum alone, downloadability is resolved by a function over the version, not by a property of `ScanStatus` in isolation.
+
+**Version rollback interaction:** rolling back to an older version is permitted only if that target version's own scan status allows access under the table above. A flagged current version does not block rollback to a clean earlier one — that is precisely the recovery path.
 
 ## 4. Sharing & Access Control
 
@@ -123,7 +170,9 @@ Applied to every link regardless of type: `revoked_at IS NULL`, and the underlyi
 
 On successful resolution, generate a short-lived signed GET URL (minutes, download-scoped only). Never a long-lived or public storage URL, and never a URL that also permits upload.
 
-### 4.4 Rate limiting
+### 4.4 Rate limiting (inbound)
+
+This section covers traffic arriving at us. Our own outbound consumption of the VirusTotal API is a separate mechanism with separate limits — see §3a.
 
 Share-link token endpoints are rate-limited per IP — an unguessable token is only unguessable if you cannot try millions of them. Password attempts on a password-protected link are separately throttled per token.
 
@@ -295,3 +344,45 @@ Changes:
 - §7 above states the rule.
 
 Verified by building the image with a value deliberately different from the default, then confirming that exact string is present in the JS actually served to the browser and that the old default appears nowhere in it. Confirming only that the container starts would not have distinguished the fix from the coincidence it replaced.
+
+## 16. Amendment Log — v1.7 (10 Sep 2026, start of M4): scan pipeline
+
+§3 was rewritten rather than patched, because four decisions changed its shape. The
+rate-limiting reference document supplied at the start of M4 was written for **inbound**
+API-key management — keys we issue to consumers, with tiers, owners and revocation. M4
+needs the mirror image: outbound budget management against one provider with one key we
+hold ourselves. Only the counter pattern transferred; `api_keys`, `rate_limit_rules` and
+`api_usage_logs` describe a feature this project does not have, and §3a records why each
+was left out.
+
+1. **"Tasks block on the limiter" was not implementable.** The original wording had tasks
+   block until budget was available. That is tolerable for the per-minute window and
+   catastrophic for the per-day one: at `concurrency=2`, two tasks waiting on an exhausted
+   daily budget deadlock the whole pipeline for up to 24 hours. Replaced with
+   reserve-or-requeue, which is what the reference document itself recommends.
+2. **Budget exhaustion keeps a file `pending`, never `scan_skipped`.** Auto-promoting it
+   would make budget exhaustion a scanning bypass anyone could trigger deliberately: burn
+   the day's budget with junk, then upload the payload and have it served unscanned. The
+   honest state costs a wait; the convenient one costs the security boundary.
+3. **File content is no longer submitted by default (§3b).** Free-tier submissions are
+   shared with the VirusTotal community, so the previous design published a customer's
+   private file to a public pool whenever VirusTotal had not seen it before. Now
+   configurable and defaulting to hash-lookup only. This makes `scan_skipped` a common
+   state again, which contradicts a knock-on note in PRD §10 — that note has been
+   corrected rather than left standing.
+4. **`flagged` and `scan_failed` had no exit (§3d).** Both were described as lasting
+   "until an admin review clears it", but no endpoint, field or milestone owned that
+   review, so M4 would have shipped two permanently inaccessible states. A minimal
+   override now lands in M4, recorded alongside the status rather than overwriting it —
+   marking a flagged file `clean` would claim a re-scan that never happened.
+
+Two further corrections found while reading §3 against the code that M2 actually shipped:
+
+5. **The checksum was trapped behind the scanning flag.** §3 computed `checksum_sha256`
+   inside the scan task, so with `scanning_enabled=false` the integrity checksum was
+   never computed at all. Checksums are an integrity feature and now run on every
+   completed upload, independently.
+6. **Step 9 described work that no longer exists.** It had the scan task chain into
+   version processing to set `files.current_version_id`, `size_bytes` and `mime_type`;
+   `complete_upload` has set those synchronously since M2, long before any scan runs. The
+   step was removed and the actual division of labour stated.

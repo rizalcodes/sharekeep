@@ -135,7 +135,7 @@ The S3-compatible endpoint supports the full multipart set (`CreateMultipartUplo
 
 ### Knock-on effects worth recording
 
-- **`scan_skipped` is temporarily unreachable.** With a 50MB per-file ceiling, every file sits far below VirusTotal's 650MB submission limit. The state and its code path are retained deliberately — both become correct again on AWS S3.
+- **~~`scan_skipped` is temporarily unreachable.~~ Superseded at M4 (10 Sep 2026).** The original reasoning still holds for the *size* route: with a 50MB per-file ceiling, no file approaches VirusTotal's 650MB submission limit, so that branch stays dead until AWS S3. But M4 added a second, far more common route — with file submission off by default (§10b), any file VirusTotal has not seen before becomes `scan_skipped`. The state is now the normal outcome for novel content rather than an unreachable edge case.
 - **The abandoned-multipart sweep became load-bearing.** On S3 a bucket lifecycle rule caught orphaned parts as a second line of defense. Supabase has no lifecycle rules, so the Celery sweep is now the only protection. Raised in priority for M3.
 - **Two databases now.** Supabase keeps object metadata in its own Postgres (`storage.buckets`, `storage.objects`); application data stays in our own Postgres container. Supabase is used for Storage only — not Auth, not application data.
 
@@ -147,6 +147,34 @@ Two additions, both because M3 could not otherwise be *validated*, which is the 
 - **Two backend endpoints for resume** (`GET /uploads`, `GET /uploads/{version_id}/parts`). M3 was scoped as purely frontend, but resume needs the server to say which parts already landed. `ListParts` support was verified against the live bucket first.
 
 Two things deliberately **not** in M3: folder drag-and-drop, which needs recursive directory traversal and server-side structure creation, and the table/grid toggle from Design.md §5. Both move to M7 so M3 stays focused on progress, retry and resume.
+
+## 10b. M4 Scan Pipeline Decisions (10 Sep 2026, start of M4)
+
+The rate-limiting reference document arrived at the start of M4. It was written for
+**inbound** API-key management — keys we issue to consumers, with tiers, owners and
+revocation — while M4 needs the mirror image: outbound budget management against one
+provider, with one key we hold. Only the pre-aggregated counter pattern transferred.
+`api_keys`, `rate_limit_rules` and `api_usage_logs` describe a feature this product does
+not have and were not built; Architecture §3a records the reasoning per table.
+
+| Decision | Choice | Reasoning |
+|---|---|---|
+| Counter storage | **Redis, not a Postgres table** | The increment-and-check must be atomic or two workers both spend the last token; the per-minute window must expire on its own, which a Postgres counter would need a dedicated sweeper task to do; and the data is disposable — losing a rate counter costs a few extra requests, unlike losing a quota row. There is also no failure mode where the limiter is down but scans still run, since Redis is the Celery broker. |
+| Limit values | **Config, not a `rate_limit_rules` table** | The table's stated purpose is changing limits without a redeploy, but VirusTotal sets these limits, not us. They are already env-overridable. A table would let us edit a number we do not control. |
+| Waiting for budget | **Requeue with countdown, never block a worker** | The original §3 wording had tasks block. At `concurrency=2`, two tasks blocking on an exhausted *daily* budget would deadlock the scan pipeline for up to 24 hours. The reference document recommends requeueing, and it is right. |
+| Budget exhausted | **File stays `pending`** | Auto-promoting to `scan_skipped` would make budget exhaustion a scanning bypass: burn the day's quota with junk uploads, then upload the payload and have it served unscanned. The cost is that a file uploaded after the budget runs out waits for the next window, so the UI needs an explicit "queued for scanning" state. |
+| Submitting file content | **Off by default; hash lookup only** | Free-tier submissions are shared with the VirusTotal community. The previous design published a customer's private file to a public analysis pool whenever VirusTotal had not seen it before — an indefensible property for a product named "secure file sharing". Coverage drops in exchange, and the badge says so honestly rather than implying a scan that did not happen. One env variable turns submission on for deployments that prefer coverage. |
+| Verdict cache | **New `scan_results` table (Schema §12a)** | With ~500 requests/day, re-asking about content already answered is the easiest budget to waste. Not derivable from `file_versions`, whose rows are pruned by the 10-version cap and deleted with their files. |
+| Flagged / failed exit | **Minimal admin override, in M4** | Both states were described as lasting "until an admin review clears it", but nothing owned that review, so M4 would have shipped two permanently inaccessible states. The override is recorded beside the status, not over it — marking a flagged file `clean` would claim a re-scan that never happened. |
+
+### Scope note on "file versioning"
+
+§7 lists M4 as "malware scanning + file versioning", but M2 already delivered versions,
+the 10-version retention cap and restore. What remained was not versioning work but a
+contradiction: Architecture §3 step 9 had the scan task set `files.current_version_id`,
+`size_bytes` and `mime_type`, which `complete_upload` has done synchronously since M2.
+The step was removed and the division of labour stated — a file becomes *visible* on
+upload and *downloadable* only when its scan status allows.
 
 ## 11. Next Steps
 

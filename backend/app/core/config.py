@@ -90,17 +90,40 @@ class Settings(BaseSettings):
     signed_upload_url_ttl_seconds: int = 3600
     multipart_chunk_size_bytes: int = 8 * 1024 * 1024
 
-    # Scanning arrives at M4. Until then uploads are marked scan_skipped rather than
-    # clean, so the UI badge tells the truth instead of claiming a check that never ran.
+    # Off, uploads land as scan_skipped and are downloadable immediately. On, they land
+    # as pending and are NOT downloadable until a scan resolves (Architecture.md §3).
+    # This is a behavioural switch, not just a feature toggle.
     scanning_enabled: bool = False
 
     # --- VirusTotal ---
     virustotal_api_key: SecretStr | None = None
+    virustotal_api_base_url: str = "https://www.virustotal.com/api/v3"
     virustotal_direct_upload_limit_bytes: int = VT_DIRECT_UPLOAD_LIMIT_BYTES
     virustotal_max_upload_limit_bytes: int = VT_LARGE_UPLOAD_LIMIT_BYTES
-    # Proactive client-side budget (Rules.md §3) — we block on the limiter, never fire-and-429.
+    # Proactive client-side budget (Architecture.md §3a). Reserve-or-requeue: a worker
+    # never blocks waiting for budget, because the daily window can be hours away.
     virustotal_requests_per_minute: int = 4
     virustotal_requests_per_day: int = 500
+
+    # Whether file CONTENT may be uploaded to VirusTotal when a hash lookup misses.
+    # Default off: free-tier submissions are shared with the VirusTotal community, so
+    # enabling this publishes a user's private file to a public analysis pool. Off means
+    # unknown files are marked scan_skipped with that reason (Architecture.md §3b).
+    virustotal_submit_unknown_files: bool = False
+    # Only consulted when submission is enabled: how long to wait for an analysis verdict.
+    virustotal_analysis_poll_attempts: int = 10
+    virustotal_analysis_poll_interval_seconds: int = 15
+
+    # --- Scan bookkeeping ---
+    # A cached verdict older than this is re-looked-up: a file clean today may be
+    # flagged next month (Architecture.md §3c).
+    scan_cache_ttl_days: int = 30
+    # A version left in pending/scanning longer than this is re-driven by the beat task,
+    # which is what recovers work lost to a killed worker.
+    scan_stuck_after_minutes: int = 30
+    # Streaming chunk for checksum computation. The worker must never hold a whole
+    # object in memory.
+    checksum_chunk_size_bytes: int = 1024 * 1024
 
     # --- Resend ---
     resend_api_key: SecretStr | None = None

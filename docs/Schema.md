@@ -2,7 +2,7 @@
 
 **Scope note:** this document covers **data schema only** — field names, types, required/optional, and relations. Naming/credential conventions live in `Rules.md`; system/workflow design lives in `Architecture.md`.
 
-**Version:** v1.3 — amended 8 September 2026 at the start of M2. Previously v1.2 (start of M1) and v1.1 (kickoff, before M0). See §15 for the amendment log.
+**Version:** v1.4 — amended 10 September 2026 at the start of M4. Previously v1.3 (start of M2), v1.2 (start of M1) and v1.1 (kickoff, before M0). See §15 for the amendment log.
 
 **Conventions:**
 - snake_case for all field and table names, plural table names.
@@ -117,15 +117,22 @@ Represents the current/latest state of a file. Version history is in `file_versi
 | `upload_id` | string | optional | **Added v1.3.** The provider's multipart upload id, held between `upload-init` and `upload-complete` and cleared on completion. Architecture §2 step 3 creates the version row before the bytes exist, so the in-flight upload needs somewhere to live; it is also what the abandoned-upload sweep aborts. |
 | `upload_started_at` | datetime | optional | **Added v1.3.** When the multipart session opened, so the sweep can find sessions older than the TTL. |
 | `size_bytes` | bigint | required | — |
-| `checksum_sha256` | string | optional | SHA-256, computed by the worker on upload finalize. Serves double duty: integrity verification, and the VirusTotal hash lookup (Architecture §3) |
+| `checksum_sha256` | string | optional | SHA-256, computed by `content_tasks.compute_checksum` on every completed upload — **independently of whether scanning is enabled** (v1.4; it was previously computed inside the scan task, so with scanning off no checksum existed at all). Serves double duty: integrity verification, and the VirusTotal hash lookup (Architecture §3) |
 | `uploaded_by` | UUID | required | → `users.id` |
 | `scan_status` | enum(`pending`, `scanning`, `clean`, `flagged`, `scan_skipped`, `scan_failed`) | required, default `pending` | Per-version scan result |
 | `scan_detail` | jsonb | optional | Scanner response summary (engine hit counts, VT analysis id, or the reason for `scan_skipped`) |
+| `scan_override_at` | datetime | optional | **Added v1.4.** When an admin released this version despite its scan status. NULL = no override. |
+| `scan_override_by` | UUID | optional | **Added v1.4.** → `users.id`; the admin who released it. |
+| `scan_override_reason` | text | optional | **Added v1.4.** The stated justification, required when an override is recorded. |
 | `deleted_at` | datetime | optional | Soft delete; set when the parent file is deleted or a single version is pruned |
 | `deletion_batch_id` | UUID | optional | **Added v1.3.** See `folders`. |
 | `created_at` | datetime | required | — |
 
-**Constraints:** UNIQUE (`file_id`, `version_number`).
+**Constraints:** UNIQUE (`file_id`, `version_number`). An override is either fully present or fully absent: `scan_override_at`, `scan_override_by` and `scan_override_reason` are all NULL, or all non-NULL.
+
+**Scan override (v1.4):** `flagged` and an exhausted-retry `scan_failed` would otherwise be permanent dead ends — the version unreachable by everyone, its owner included, forever (Architecture §3d). A workspace owner or admin can release one specific version, and the release is recorded in these three fields **rather than by changing `scan_status`**. Marking it `clean` would assert a re-scan that never happened; the record has to keep saying "this was flagged, and a named person chose to release it anyway". Downloadability is therefore a function of the version — status *and* override — not a property of the status enum alone.
+
+The override lives only on the version, not mirrored onto `files`. A listing that needs to show "flagged, released by X" joins the current version rather than duplicating the fields, so there is one source of truth for whether access was granted.
 
 **Retention (v1.3):** at most **10 retained versions per file**. On upload of an 11th,
 the oldest surviving version is pruned — its row soft-deleted and its object removed by
@@ -195,7 +202,7 @@ Explicit permission grants for a file or folder to a specific workspace member, 
 | `metadata` | jsonb | optional | Action-specific detail (e.g. which permission changed to what, or the denial reason) |
 | `created_at` | datetime | required | — |
 
-**`action` enum (expanded in v1.1):** `upload`, `download`, `share_created`, `share_revoked`, `share_accessed`, `share_access_denied`, `delete`, `permission_changed`, `version_restored`, `folder_created`, `folder_deleted`, `login`, `login_failed`, `member_added`, `member_removed`, `member_role_changed`, `invitation_sent`, `invitation_accepted`, `invitation_revoked`, `logout`, `scan_flagged`, `quota_exceeded`.
+**`action` enum (expanded in v1.1):** `upload`, `download`, `share_created`, `share_revoked`, `share_accessed`, `share_access_denied`, `delete`, `permission_changed`, `version_restored`, `folder_created`, `folder_deleted`, `login`, `login_failed`, `member_added`, `member_removed`, `member_role_changed`, `invitation_sent`, `invitation_accepted`, `invitation_revoked`, `logout`, `scan_flagged`, `scan_override`, `quota_exceeded`.
 
 The `share_accessed` / `share_access_denied` pair exists because Architecture §4.5 requires logging every resolution attempt, success **and** failure — the original enum had no way to express a failed attempt, which is precisely the event a security audit log exists to capture.
 
@@ -243,6 +250,34 @@ the old row is revoked and points at its replacement. Presenting an already-rota
 token is treated as theft — the whole chain for that user is revoked.
 
 ---
+
+## 12a. `scan_results` (added v1.4)
+
+Verdict cache keyed on file content, so a hash VirusTotal has already answered for costs
+zero further requests (Architecture §3c).
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | UUID | required | Primary key |
+| `checksum_sha256` | string | required | The file content hash this verdict is about |
+| `verdict` | enum(`clean`, `flagged`) | required | Only settled verdicts are cached; `pending`/`scanning`/`scan_failed` are transient and caching them would serve a non-answer |
+| `detail` | jsonb | optional | Engine hit summary and the VT analysis id, copied to each version that uses this verdict |
+| `checked_at` | datetime | required | When VirusTotal was asked. An entry older than `scan_cache_ttl_days` (default 30) is treated as absent and re-looked-up — a file clean today may be flagged next month |
+| `created_at` | datetime | required | — |
+| `updated_at` | datetime | required | Refreshed when a re-lookup replaces a stale verdict |
+
+**Constraints:** UNIQUE (`checksum_sha256`) — one row per hash, updated in place on
+re-lookup rather than accumulating history.
+
+**Why a dedicated table rather than querying `file_versions.checksum_sha256`:** version
+rows are pruned by the 10-version retention cap and hard-deleted along with their files,
+so they disappear exactly when the cache would be most useful. A cache also needs
+`checked_at` to expire on its own terms, which a version row has no place to store.
+
+This table holds **no** workspace or user reference. A hash verdict is a fact about file
+content, not about who uploaded it, and scoping it per workspace would multiply requests
+against a 500/day budget for no benefit. It is therefore not workspace-isolated data and
+must never be exposed through a workspace-scoped API — it is worker-internal.
 
 ## 13. Relation Summary
 
@@ -330,3 +365,26 @@ Found reading v1.2 against what M2 has to build:
    *per file or folder* and Architecture §4.1 steps 1-2 depend on it, but M1 was
    workspace-level only. Built in M2 alongside the folder tree, since the ancestor walk
    it needs is the same traversal the tree code already performs.
+
+### v1.4 (10 Sep 2026, start of M4)
+
+1. **`scan_results` added (§12a).** A verdict cache keyed on SHA-256. VirusTotal's free
+   tier allows ~500 requests/day, so re-asking about content we have already asked about
+   is the easiest budget to waste: two users uploading the same PDF should cost one
+   request, not two. Not derivable from `file_versions.checksum_sha256`, because those
+   rows are pruned by the 10-version cap and hard-deleted with their files — they vanish
+   exactly when the cache would pay off — and because a cache needs its own `checked_at`
+   to expire on.
+2. **`scan_override_at` / `scan_override_by` / `scan_override_reason` added to
+   `file_versions` (§7).** `flagged` and an exhausted-retry `scan_failed` had no exit in
+   the design: the version was unreachable by everyone including its owner, permanently.
+   The release is recorded in these fields instead of by moving `scan_status` to `clean`,
+   because nothing re-scanned the file — claiming otherwise in the record would be a
+   fabricated verdict.
+3. **`scan_override` added to the `audit_logs` action enum (§10).** Releasing a file the
+   scanner flagged is exactly the kind of act an audit log exists for.
+4. **`checksum_sha256` decoupled from scanning (§7).** It was described as computed by the
+   worker on upload finalize, and Architecture §3 put that work inside the scan task —
+   so with `scanning_enabled=false` the integrity checksum was never computed at all.
+   Found by reading the two documents against each other at the start of M4, not by
+   running anything.
