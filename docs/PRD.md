@@ -176,6 +176,27 @@ contradiction: Architecture §3 step 9 had the scan task set `files.current_vers
 The step was removed and the division of labour stated — a file becomes *visible* on
 upload and *downloadable* only when its scan status allows.
 
+## 10c. M5 Share Link Decisions (11 Sep 2026, start of M5)
+
+| Decision | Choice | Reasoning |
+|---|---|---|
+| Token storage | **SHA-256 hash, raw shown once** | Every other bearer token here is stored hashed (refresh tokens, invitations, both since M1). A raw `token` column would have made the most widely *distributed* token the only unprotected one, so a leaked backup would hand over a working link to every shared file. Cost, stated up front: a link cannot be copied again after creation. |
+| Scan override vs. share links | **Override does not extend to links** | M4 lets an owner release a flagged file for their own workspace. Reusing that answer here would turn "I accept this risk" into "strangers accept this risk on my word", with no flag visible to them. Share links apply the stricter rule, written explicitly in Architecture §4.2 so it is not read as accidental duplication. |
+| Auditing unknown tokens | **Only links that exist are audited** | Attempts against a real link — wrong password, expired, revoked, limit reached, wrong user — are exactly the forensically valuable events and are all logged. A token matching nothing has no workspace to attribute and no target that resolves, and its volume is attacker-controlled: brute-forcing would append unbounded rows to our own audit table, with a fail-open limiter as the only bound. Those go to the rate limiter and the application log. |
+| Signed URL TTL for shares | **Separate, 60s (vs 300s internal)** | Once a signed URL is out, revoking the link cannot recall it, so the TTL is the revocation window. Shortening it is nearly free: the TTL governs when a transfer must start, not how long it runs. The residual window is documented, not implied away. |
+| `max_downloads` semantics | **Counts link uses, not downloads** | The API never proxies bytes, so a completed download is unobservable. The counter increments when a URL is issued, under a row lock; the UI says "uses" because that is what it limits. |
+
+### Verified rather than assumed
+
+Before designing on top of presigned URLs, the live bucket was probed (Architecture §4.3
+records the detail). Two findings mattered: Supabase **does** honour the download
+disposition, so "download-only" is a fact; and it serves `content-type: text/plain`
+regardless of what an object was stored as, so shared HTML cannot execute in a visitor's
+browser — a second independent layer, and a sign that `files.mime_type` is our own UI
+metadata rather than what storage returns. Also confirmed: `PUT` against a download URL
+is refused, an expired signature returns 400 rather than 403, and the URL discloses the
+full storage key to the recipient.
+
 ## 11. Next Steps
 
 1. ~~Draft `Schema.md`, `Rules.md`, `Architecture.md`, and `Design.md`.~~ Done.

@@ -2,7 +2,7 @@
 
 **Scope note:** this document covers **data schema only** — field names, types, required/optional, and relations. Naming/credential conventions live in `Rules.md`; system/workflow design lives in `Architecture.md`.
 
-**Version:** v1.4 — amended 10 September 2026 at the start of M4. Previously v1.3 (start of M2), v1.2 (start of M1) and v1.1 (kickoff, before M0). See §15 for the amendment log.
+**Version:** v1.5 — amended 11 September 2026 at the start of M5. Previously v1.4 (start of M4), v1.3 (start of M2), v1.2 (start of M1) and v1.1 (kickoff, before M0). See §15 for the amendment log.
 
 **Conventions:**
 - snake_case for all field and table names, plural table names.
@@ -174,18 +174,20 @@ Explicit permission grants for a file or folder to a specific workspace member, 
 |---|---|---|---|
 | `id` | UUID | required | Primary key |
 | `file_id` | UUID | required | → `files.id` |
-| `token` | string | required, unique | Cryptographically random, unguessable — never derived from `file_id` |
+| `token_hash` | string | required, unique | SHA-256 of a cryptographically random token, never derived from `file_id`. **Changed from a raw `token` column in v1.5.** The raw value is returned once at creation and never stored, exactly as M1 already does for refresh tokens and invitations — a leaked database or backup then yields no usable share link. The consequence is deliberate and surfaced in the UI: a link cannot be copied again later; recovering it means issuing a new one and revoking the old. |
 | `link_type` | enum(`public`, `private`, `password_protected`, `expiring`) | required | Primary access rule |
 | `hashed_password` | string | optional | **Required** if `link_type = password_protected`; **allowed** on any other type as a modifier |
 | `allowed_user_id` | UUID | optional | → `users.id`; required if `link_type = private`. v1 supports a single allowed user per link — create multiple links for multiple recipients |
 | `expires_at` | datetime | optional | **Required** if `link_type = expiring`; **allowed** on any other type as a modifier |
 | `max_downloads` | integer | optional | Modifier, valid on any type |
-| `download_count` | integer | required, default 0 | — |
+| `download_count` | integer | required, default 0 | Counts **link resolutions**, not completed downloads — the bytes are served straight from storage, so a finished download is not observable here (Architecture §4.2). Incremented under a row lock. |
 | `created_by` | UUID | required | → `users.id` |
 | `revoked_at` | datetime | optional | Manual revocation before expiry |
 | `created_at` / `updated_at` | datetime | required | — |
 
-**Constraints:** CHECK enforcing the three type requirements above (`password_protected` ⇒ `hashed_password IS NOT NULL`; `expiring` ⇒ `expires_at IS NOT NULL`; `private` ⇒ `allowed_user_id IS NOT NULL`).
+**Constraints:** CHECK enforcing the three type requirements above (`password_protected` ⇒ `hashed_password IS NOT NULL`; `expiring` ⇒ `expires_at IS NOT NULL`; `private` ⇒ `allowed_user_id IS NOT NULL`), UNIQUE (`token_hash`), and CHECK (`max_downloads IS NULL OR max_downloads > 0`) — a link created with a zero limit would be dead on arrival, which is a mistake worth refusing rather than storing.
+
+The CHECK enforces the type *requirements* only. It must not forbid the modifiers on other types: `public` with `expires_at`, or `expiring` with a password, are both valid and are the combinations the v1.1 clarification above exists to permit.
 
 ## 10. `audit_logs`
 
@@ -388,3 +390,21 @@ Found reading v1.2 against what M2 has to build:
    so with `scanning_enabled=false` the integrity checksum was never computed at all.
    Found by reading the two documents against each other at the start of M4, not by
    running anything.
+
+### v1.5 (11 Sep 2026, start of M5)
+
+1. **`share_links.token` became `token_hash` (§9).** The column was specified to hold the
+   raw token. Every other bearer token in this system — refresh tokens since M1,
+   invitation tokens since M1 — is stored as SHA-256 with the raw value shown once, and
+   there was no reason for the most widely distributed token of the three to be the
+   exception. A leaked database or backup would have handed over a working link to every
+   file ever shared. The trade-off it forces (no re-copying a link later) is recorded in
+   §9 and in Architecture §4.2 rather than left for a user to discover.
+2. **`download_count` documented as counting resolutions, not downloads (§9).** The API
+   never proxies file bytes, so a completed download is not an event this system can see.
+   Naming it accurately in the schema keeps the UI from implying a guarantee the
+   architecture cannot make.
+3. **Constraints tightened and clarified (§9).** UNIQUE on `token_hash`, a CHECK
+   rejecting `max_downloads = 0` (a link dead on creation is a mistake, not a state), and
+   an explicit note that the type CHECK must not forbid modifiers on other types — the
+   exact reading the v1.1 clarification was written to prevent.

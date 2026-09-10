@@ -2,7 +2,7 @@
 
 **Scope note:** system/service design — how components interact, the background job pipeline, security architecture. Not data structure (`Schema.md`) or naming/conventions (`Rules.md`).
 
-**Version:** v1.7 — scan pipeline reworked at the start of M4, 10 September 2026 (see §16). Previously v1.6 (frontend build-time configuration, §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
+**Version:** v1.8 — share-link resolution specified at the start of M5, 11 September 2026 (see §17). Previously v1.7 (scan pipeline, §16). Previously v1.6 (frontend build-time configuration, §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
 
 ---
 
@@ -160,25 +160,51 @@ The **primary type** determines the base rule:
 - `public`: any bearer of the token.
 - `expiring`: valid only while `now() < expires_at`.
 - `password_protected`: token plus the correct password, checked against `hashed_password` (constant-time comparison via the password hasher).
-- `private`: requester must be authenticated AND match `allowed_user_id`.
+- `private`: requester must be authenticated AND match `allowed_user_id`. A private link therefore grants access to a file **without** workspace membership — that is the point of sharing — and the grant is to exactly one named user, not to anyone who happens to hold the token.
 
-**Modifiers apply on top of any type** (Schema.md §9): if `expires_at` is set it is enforced regardless of type; if `hashed_password` is set the password is required regardless of type; if `max_downloads` is set, `download_count < max_downloads` is enforced. So a password-protected link that also expires enforces both.
+**Modifiers apply on top of any type** (Schema.md §9): if `expires_at` is set it is enforced regardless of type; if `hashed_password` is set the password is required regardless of type; if `max_downloads` is set, `download_count < max_downloads` is enforced. So a password-protected link that also expires enforces both. Validation must therefore *accept* combinations like `public` + `expires_at`; rejecting them would recreate the single-enum reading that Schema §9 v1.1 exists to correct.
 
-Applied to every link regardless of type: `revoked_at IS NULL`, and the underlying file's `deleted_at IS NULL` and scan status permitting access per §3.
+Applied to every link regardless of type: `revoked_at IS NULL`, and the underlying file's `deleted_at IS NULL`.
+
+**The token is stored hashed** (v1.8). `share_links.token_hash` holds SHA-256 of the raw token; the raw value is shown once at creation and never persisted, matching what M1 already does for refresh tokens and invitations. A leaked database, backup, or read-only injection therefore yields no working share links. The cost is stated rather than hidden: **a link cannot be copied again later.** The owner sees it once; recovering it means creating a new link and revoking the old one.
+
+**Scan gate, and the one place it deliberately differs from §3.** A share link resolves only if the file's current version is downloadable under §3 — *except* that an owner's scan override does **not** carry to share links. A flagged version released by an override stays unreachable through every link type.
+
+This is a second, stricter rule rather than a reuse of `scan.version_is_downloadable`, and it is written here explicitly so it is not mistaken for accidental duplication. The reasoning: an override is a workspace owner accepting a risk **for their own workspace**. Letting that same decision feed a public link turns "I accept this risk" into "strangers accept this risk on my word", and the people bearing it never see the flag. The override remains what it is for members; it simply does not become a distribution channel. `shares.version_is_shareable` is the single implementation of the stricter rule, and it is defined in terms of the §3 function so the two cannot drift apart silently.
+
+**A link tracks the file, not a fixed version.** `share_links.file_id` targets the file, so a link always serves the current version. Uploading a new version changes what a previously-shared link delivers, and if that new version is `pending` the link correctly stops working until its scan resolves. This is the same behaviour a reader expects from Drive or Dropbox, but it means a link is not a promise about specific bytes.
+
+**`max_downloads` counts resolutions, not completed downloads.** The bytes are fetched straight from object storage (Rules.md §3 — the API never proxies file content), so a completed download is not an event this system can observe. The counter increments when a signed URL is issued, under a row lock so two simultaneous requests at `max_downloads - 1` cannot both succeed. Two consequences, both stated in the UI rather than papered over: a visitor who requests the link and never finishes the download still consumes one, and a single issued URL can be replayed until it expires. The field is presented to users as a limit on link *uses*, because that is what it is.
 
 ### 4.3 Serving the bytes
 
-On successful resolution, generate a short-lived signed GET URL (minutes, download-scoped only). Never a long-lived or public storage URL, and never a URL that also permits upload.
+On successful resolution, generate a short-lived signed GET URL, download-scoped only. Never a long-lived or public storage URL, and never a URL that also permits upload.
+
+**Share links use their own, shorter TTL** (`signed_share_url_ttl_seconds`, default 60s) rather than the 300s used for authenticated downloads. The reason is revocation: once a signed URL has been handed out, revoking the share link cannot recall it, so the TTL is the width of the window in which a revoked link still works. Sixty seconds is close to free, because the TTL governs when the transfer must *start* — a download already in flight is not interrupted when the signature expires. **The remaining window is a real property of presigned URLs, not something this design eliminates**, and it is documented rather than implied away.
+
+**Verified against the live bucket on 11 September 2026**, because §4.3 makes claims that are the provider's to keep, not ours:
+
+- `ResponseContentDisposition` **is** honoured: the response carries `attachment; filename="…"`, so "download-only" is a fact rather than a hope.
+- Supabase returns `content-type: text/plain` regardless of the `ContentType` the object was stored with. A shared `.html` or `.svg` therefore will not execute in the visitor's browser even if the disposition header were absent — a second, independent layer. The corollary is that `files.mime_type` is metadata for our own UI and **not** what storage serves.
+- A `PUT` against a download URL is refused with 403, so the signature really is GET-scoped.
+- An expired signature is refused with HTTP **400** (not 403), which is what error mapping must expect.
+- The signed URL discloses the whole storage key — workspace, file and version UUIDs plus the original filename — to the recipient. Low severity, since every workspace endpoint independently refuses non-members, but a share recipient is by definition outside the workspace, so it is recorded rather than left unnoticed. Removing it would mean proxying bytes through the API, which Rules.md §3 rules out for good reasons.
 
 ### 4.4 Rate limiting (inbound)
 
 This section covers traffic arriving at us. Our own outbound consumption of the VirusTotal API is a separate mechanism with separate limits — see §3a.
 
-Share-link token endpoints are rate-limited per IP — an unguessable token is only unguessable if you cannot try millions of them. Password attempts on a password-protected link are separately throttled per token.
+Share-link token endpoints are rate-limited per IP — an unguessable token is only unguessable if you cannot try millions of them. Password attempts on a password-protected link are separately throttled per token, so one link under attack cannot be unlocked by brute force and cannot be used to exhaust an unrelated visitor's IP budget either.
+
+Both limiters use `core.rate_limit`, which **fails open** on a Redis outage. That is the right trade for inbound throttling — a Redis problem must not take down sharing for everyone — and it is the opposite of the outbound budget in §3a, which fails closed because there the failure mode is spending someone else's quota. The two are different mechanisms for that reason.
 
 ### 4.5 Audit
 
-Every resolution attempt — success **and** failure — is written to `audit_logs` with `share_accessed` or `share_access_denied`, capturing `ip_address`, `user_agent`, and the denial reason in `metadata`.
+Every resolution attempt against a share link that **exists** is written to `audit_logs` with `share_accessed` or `share_access_denied`, capturing `ip_address`, `user_agent`, and the denial reason in `metadata`. That includes every interesting failure: right token and wrong password, expired, revoked, download limit reached, wrong user on a private link, or a file whose scan status withholds it.
+
+**A token matching no link writes no audit row** (v1.8). The volume there is entirely attacker-controlled: brute-forcing tokens would otherwise append unbounded rows to our own audit table, and since the inbound limiter fails open, a Redis outage would remove the only bound. There is also nothing truthful to write — no `workspace_id` to attribute it to and no `target_id` that resolves. Unknown-token attempts are instead visible in the rate limiter and the application log, which is where high-volume noise belongs. The audit table keeps its forensic value precisely by not being writable at will by anyone who can guess a URL shape.
+
+`share_created` and `share_revoked` are audited with the acting user, as workspace-scoped events.
 
 ### 4.6 Workspace management permissions
 
@@ -386,3 +412,55 @@ Two further corrections found while reading §3 against the code that M2 actuall
    version processing to set `files.current_version_id`, `size_bytes` and `mime_type`;
    `complete_upload` has set those synchronously since M2, long before any scan runs. The
    step was removed and the actual division of labour stated.
+
+## 17. Amendment Log — v1.8 (11 Sep 2026, start of M5): share links
+
+§4.2–§4.5 were rewritten rather than annotated, because four decisions changed the rules
+rather than adding to them.
+
+1. **Tokens are stored hashed (`token_hash`), not raw.** M1 already established this for
+   refresh tokens and invitations: 48 bytes of CSPRNG output, persisted as SHA-256, shown
+   once. Schema §9 had specified a raw `token` column, which would have made a database
+   leak hand over a working link to every file ever shared — and would have been the only
+   bearer token in the system not protected that way. The cost is real and is now stated
+   in §4.2 rather than discovered later: a link cannot be copied again after creation.
+2. **A scan override does not extend to share links.** M4 gave a workspace owner a way to
+   release a flagged file, deliberately recorded beside the status rather than over it.
+   Reusing §3's answer verbatim here would have let that release become a public
+   distribution channel — "I accept this risk" silently becoming "strangers accept this
+   risk on my word", with no flag visible to them. Share links therefore apply a stricter
+   rule, and §4.2 says so explicitly so it is not read as accidental duplication.
+3. **Only attempts against links that exist are audited.** §4.5 required auditing every
+   attempt. For a token matching nothing there is no `workspace_id` to attribute and no
+   `target_id` that resolves — and the volume is attacker-controlled, so brute-forcing
+   would append unbounded rows to our own audit table with the inbound limiter (which
+   fails open) as the only bound. Unknown tokens now go to the rate limiter and the
+   application log instead. Every *interesting* failure — right token, wrong password;
+   expired; revoked; limit reached; wrong user — is still audited in full.
+4. **Share links get their own, shorter signed-URL TTL** (60s against 300s). Once a
+   signed URL is issued, revoking the link cannot recall it, so the TTL *is* the
+   revocation window. Shortening it costs almost nothing because the TTL governs when a
+   transfer must start, not how long it may run. The residual window is documented as a
+   property of presigned URLs rather than implied away.
+
+Three further points were specified because the resolution path is meaningless without
+them, and all three are stated in §4.2:
+
+5. **`max_downloads` counts link resolutions, not completed downloads.** The bytes come
+   straight from storage, so a finished download is not an observable event here. The
+   counter increments when a URL is issued, under a row lock so two simultaneous
+   requests at the limit cannot both pass, and the UI calls it a limit on link *uses*.
+6. **A link tracks the file, not a version.** It always serves the current version, so a
+   new upload changes what an already-shared link delivers, and a `pending` new version
+   correctly makes the link stop working until its scan resolves.
+7. **Type and modifiers must combine.** Validation accepts `public` + `expires_at` and
+   similar; rejecting those would restore exactly the single-enum reading that Schema §9
+   v1.1 was written to correct.
+
+§4.3 additionally records what was **verified against the live bucket** rather than
+assumed, since those claims are the provider's to keep: the download disposition is
+honoured, Supabase serves `text/plain` regardless of stored content type (so shared HTML
+cannot execute — a second independent layer, and a sign that `files.mime_type` is our own
+metadata, not what storage serves), a `PUT` against a download URL is refused 403, an
+expired signature returns 400 rather than 403, and the signed URL discloses the full
+storage key to the recipient.
