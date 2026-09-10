@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.core.dependencies import CurrentUser, DbSession, ViewerAccess
+from app.core.dependencies import CurrentUser, DbSession, OwnerAccess, ViewerAccess
 from app.models.content import File, FilePermission, FileVersion
 from app.models.enums import AuditAction, AuditTargetType, WorkspaceRole
 from app.models.identity import User
@@ -27,14 +27,16 @@ from app.schemas.content import (
     QuotaOut,
     RestoreRequest,
     ResumeState,
+    ScanOverrideRequest,
     UploadCompleteRequest,
     UploadInitRequest,
     UploadInitResponse,
     UploadPart,
     VersionOut,
 )
-from app.services import audit, permissions, quota, storage
+from app.services import audit, permissions, quota, scan, storage
 from app.services import files as file_service
+from app.tasks import content_tasks
 
 router = APIRouter(
     prefix=f"{settings.api_v1_prefix}/workspaces/{{workspace_id}}",
@@ -204,6 +206,12 @@ async def upload_complete(
     for old in pruned:
         storage.delete_object(old.storage_key)
 
+    # Queued after the commit, deliberately: a worker picking this up before the
+    # transaction lands would look for a version row that does not exist yet. The task
+    # computes the integrity checksum and, when scanning is enabled, chains into the
+    # scan (Architecture.md §3).
+    content_tasks.compute_checksum.delay(str(version.id))
+
     await db.refresh(file)
     return FileOut.model_validate(file)
 
@@ -279,10 +287,77 @@ async def list_versions(
             **{
                 **VersionOut.model_validate(v).model_dump(),
                 "is_current": v.id == file.current_version_id,
+                # Resolved server-side so a client cannot re-derive the §3 access table
+                # and arrive somewhere different from the code that enforces it.
+                "is_downloadable": scan.version_is_downloadable(v),
             }
         )
         for v in result.scalars().all()
     ]
+
+
+@router.post(
+    "/files/{file_id}/versions/{version_id}/scan-override",
+    response_model=VersionOut,
+)
+async def override_scan(
+    file_id: uuid.UUID,
+    version_id: uuid.UUID,
+    payload: ScanOverrideRequest,
+    request: Request,
+    access: OwnerAccess,
+    user: CurrentUser,
+    db: DbSession,
+) -> VersionOut:
+    """Release a flagged or unscannable version (Architecture.md §3d).
+
+    Workspace **owner** only, and deliberately not resolved through per-object
+    permissions: an editor granted rights on one folder should not be able to overrule
+    the scanner. This is a workspace-level trust decision.
+
+    `scan_status` is left untouched. The override is recorded alongside it, so the file
+    keeps saying it was flagged and now also says who released it and why — setting it
+    to `clean` would assert a re-scan that never happened.
+    """
+    workspace, _ = access
+    file = await _load(db, workspace.id, file_id)
+    version = await db.get(FileVersion, version_id)
+    # Checked against the file we just loaded by workspace, so a version id from
+    # another workspace cannot be reached by pairing it with a file id from this one.
+    if version is None or version.file_id != file.id or version.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "File version not found.")
+
+    try:
+        version = await scan.record_override(
+            db, version, user_id=user.id, reason=payload.reason
+        )
+    except scan.OverrideNotPermitted as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+
+    await audit.record(
+        db,
+        action=AuditAction.SCAN_OVERRIDE,
+        target_type=AuditTargetType.FILE,
+        target_id=file.id,
+        workspace_id=workspace.id,
+        actor_id=user.id,
+        request=request,
+        metadata={
+            "file_version_id": str(version.id),
+            "file_name": file.name,
+            "scan_status": version.scan_status.value,
+            "reason": payload.reason,
+        },
+    )
+    await db.commit()
+    await db.refresh(version)
+    return VersionOut(
+        **{
+            **VersionOut.model_validate(version).model_dump(),
+            "is_current": version.id == file.current_version_id,
+            "is_downloadable": scan.version_is_downloadable(version),
+        }
+    )
 
 
 # --- Mutate ----------------------------------------------------------------------

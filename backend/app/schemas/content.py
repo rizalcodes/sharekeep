@@ -147,9 +147,28 @@ class VersionOut(BaseModel):
     size_bytes: int
     checksum_sha256: str | None
     scan_status: ScanStatus
+    scan_detail: dict | None = None
+    # Override fields are surfaced, not hidden behind the status: the interface has to
+    # keep showing that a released file was flagged and who released it (Design.md §5).
+    scan_override_at: datetime | None = None
+    scan_override_by: uuid.UUID | None = None
+    scan_override_reason: str | None = None
+    # The resolved access answer, so a client never has to re-derive the §3 table and
+    # risk deriving it differently from the server.
+    is_downloadable: bool = False
     uploaded_by: uuid.UUID
     created_at: datetime
     is_current: bool = False
+
+
+class ScanOverrideRequest(BaseModel):
+    """Releasing a file the scanner flagged demands a stated reason.
+
+    Not optional and not free-form-empty: the audit entry is only meaningful if it
+    records why someone decided to serve a file that was flagged.
+    """
+
+    reason: str = Field(min_length=10, max_length=1000)
 
 
 class DownloadResponse(BaseModel):

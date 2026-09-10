@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.services import storage
+from app.services import storage, vt_budget
 
 logger = logging.getLogger(__name__)
 
@@ -86,4 +86,17 @@ async def readiness(response: Response, db: AsyncSession = Depends(get_db)) -> d
     all_ok = all(check["ok"] for check in checks.values())
     if not all_ok:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
-    return {"status": "ready" if all_ok else "degraded", "checks": checks}
+
+    # Reported alongside the checks, never as one of them. An exhausted daily scan
+    # budget is ordinary operation on a free tier, not a sick service, and letting it
+    # turn readiness into 503 would take the whole API out of rotation over a quota
+    # that resets at midnight (Architecture.md §3a).
+    scanner: dict[str, Any] = {"enabled": settings.scanning_enabled}
+    if settings.scanning_enabled:
+        scanner.update(await vt_budget.usage())
+
+    return {
+        "status": "ready" if all_ok else "degraded",
+        "checks": checks,
+        "scanner": scanner,
+    }

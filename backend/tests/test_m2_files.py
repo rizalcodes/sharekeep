@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.models.content import File
+from app.models.content import File, FileVersion
 from app.models.enums import ScanStatus
 from app.services import files as file_service
 from app.services import quota
@@ -169,13 +169,21 @@ async def test_uploads_are_marked_not_scanned_until_m4(make_client):
 
 
 async def test_a_flagged_file_is_never_downloadable(make_client, db):
-    """Adversarial: not even to its owner (Architecture.md §3)."""
+    """Adversarial: not even to its owner (Architecture.md §3).
+
+    The status is set on the **version**, which is where M4 moved the access decision.
+    `files.scan_status` is a mirror of the current version for listings; deciding on the
+    mirror would mean an override recorded on the version could not be seen by the code
+    granting access.
+    """
     client, ws = await _workspace(make_client, "f-flag@example.com")
     file_id = (await upload_file(client, ws, "virus.exe")).json()["id"]
 
     import uuid as _uuid
 
     file = await db.get(File, _uuid.UUID(file_id))
+    version = await db.get(FileVersion, file.current_version_id)
+    version.scan_status = ScanStatus.FLAGGED
     file.scan_status = ScanStatus.FLAGGED
     await db.flush()
 
@@ -191,6 +199,8 @@ async def test_a_pending_file_is_not_downloadable(make_client, db):
     import uuid as _uuid
 
     file = await db.get(File, _uuid.UUID(file_id))
+    version = await db.get(FileVersion, file.current_version_id)
+    version.scan_status = ScanStatus.PENDING
     file.scan_status = ScanStatus.PENDING
     await db.flush()
 

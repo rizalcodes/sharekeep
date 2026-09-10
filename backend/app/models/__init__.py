@@ -17,6 +17,7 @@ from app.models.content import (
     FilePermission,
     FileVersion,
     Folder,
+    ScanResult,
     SoftDeleteBatchMixin,
 )
 from app.models.enums import (
@@ -47,6 +48,7 @@ __all__ = [
     "Folder",
     "InvitationStatus",
     "RefreshToken",
+    "ScanResult",
     "ScanStatus",
     "SoftDeleteBatchMixin",
     "SoftDeleteMixin",

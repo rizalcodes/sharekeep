@@ -31,6 +31,7 @@ import posixpath
 import re
 import unicodedata
 import uuid
+from collections.abc import Iterator
 from functools import lru_cache
 from typing import Any
 
@@ -267,6 +268,42 @@ def delete_object(storage_key: str) -> None:
         )
     except (BotoCoreError, ClientError) as exc:
         logger.warning("failed to delete %s: %s", storage_key, type(exc).__name__)
+
+
+# --- Reading objects back (Architecture.md §3, added in M4) -----------------------
+#
+# Upload never routes bytes through the backend, but scanning has to: the checksum is
+# computed over the stored object, and VirusTotal submission needs the content. Both
+# stream in fixed-size chunks. A worker holding a whole 50MB object in memory alongside
+# a second concurrent task is avoidable, and the ceiling rises again on S3.
+
+
+def stream_object(storage_key: str, *, chunk_size: int | None = None) -> Iterator[bytes]:
+    """Yield an object's bytes in chunks, never materialising the whole thing."""
+    size = chunk_size or settings.checksum_chunk_size_bytes
+    response = get_storage_client().get_object(
+        Bucket=settings.supabase_storage_bucket, Key=storage_key
+    )
+    body = response["Body"]
+    try:
+        yield from body.iter_chunks(chunk_size=size)
+    finally:
+        body.close()
+
+
+def download_to_path(storage_key: str, path: str, *, chunk_size: int | None = None) -> int:
+    """Copy an object to a local path, returning the byte count actually written.
+
+    The count is returned rather than assumed from metadata so a caller can compare it
+    against what the database believes and notice a truncated read instead of scanning
+    a partial file and calling the result a verdict.
+    """
+    written = 0
+    with open(path, "wb") as handle:
+        for chunk in stream_object(storage_key, chunk_size=chunk_size):
+            handle.write(chunk)
+            written += len(chunk)
+    return written
 
 
 def list_parts(storage_key: str, upload_id: str) -> list[dict[str, Any]]:

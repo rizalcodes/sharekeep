@@ -17,6 +17,8 @@ celery_app = Celery(
     backend=settings.celery_result_backend,
     include=[
         "app.tasks.maintenance_tasks",
+        "app.tasks.content_tasks",
+        "app.tasks.scan_tasks",
     ],
 )
 
@@ -44,6 +46,14 @@ celery_app.conf.beat_schedule = {
     "sweep-abandoned-multipart-uploads": {
         "task": "app.tasks.maintenance_tasks.sweep_abandoned_multipart_uploads",
         "schedule": crontab(hour="*/6", minute="15"),
+    },
+    # Architecture.md §3a: a worker killed mid-scan leaves a version in `scanning` with
+    # nothing scheduled, and a version left `pending` by a misconfigured key has nothing
+    # to restart it either. Both are recovered here rather than waiting for someone to
+    # notice a file that never became downloadable.
+    "redrive-stalled-scans": {
+        "task": "app.tasks.scan_tasks.redrive_stalled_scans",
+        "schedule": crontab(minute="*/15"),
     },
     # Supabase free-tier projects pause after 7 days of inactivity (PRD §10).
     # Daily is ample headroom; removed when the project returns to AWS S3.

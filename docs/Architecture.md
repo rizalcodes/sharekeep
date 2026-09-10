@@ -98,7 +98,7 @@ Verdicts age — a file clean today may be flagged next month — so an entry ol
 
 ### 3d. Flagged files and admin override
 
-Without an exit, `flagged` and an exhausted-retry `scan_failed` are permanent dead ends: the file is inaccessible to everyone, including its owner, forever. A workspace owner or admin may therefore override a specific version.
+Without an exit, `flagged` and an exhausted-retry `scan_failed` are permanent dead ends: the file is inaccessible to everyone, including its owner, forever. A workspace **owner** may therefore override a specific version. (Owner is the most privileged of the three roles — viewer, editor, owner — and there is no separate admin role; earlier drafts of this section said "owner or admin", which implied one.)
 
 **The override does not rewrite history.** `scan_status` stays `flagged` or `scan_failed`; the override is recorded separately (`scan_override_at`, `scan_override_by`, `scan_override_reason` — Schema.md §7) and is what grants access. Setting the status to `clean` instead would be a lie: nothing re-scanned the file and nothing pronounced it safe. The UI must keep showing that the file was flagged **and** that a named person chose to release it.
 
@@ -111,8 +111,8 @@ Every override is written to `audit_logs` with the new `scan_override` action, i
 | `pending`, `scanning` | No — the UI shows the file with a scanning or "queued for scanning" badge, but no download URL is issued |
 | `clean` | Yes |
 | `scan_skipped` | Yes, with a persistent "not scanned" badge |
-| `flagged` | **No** — including to the owner — unless an admin override is recorded on that version (§3d) |
-| `scan_failed` | No, until a retry succeeds or an admin override is recorded |
+| `flagged` | **No** — including to the uploader — unless an owner override is recorded on that version (§3d) |
+| `scan_failed` | No, until a retry succeeds or an owner override is recorded |
 
 Because two of these rows now depend on the override record and not on the enum alone, downloadability is resolved by a function over the version, not by a property of `ScanStatus` in isolation.
 

@@ -14,7 +14,7 @@ from app.models.content import File, FileVersion, Folder
 from app.models.enums import ScanStatus
 from app.models.identity import User, Workspace
 from app.services import folders as folder_service
-from app.services import quota, storage
+from app.services import quota, scan, storage
 
 # Schema.md §7. Without a cap, one repeatedly re-uploaded file can exhaust a
 # workspace's quota with no way to reclaim the space short of deleting the file.
@@ -319,21 +319,21 @@ async def restore(
 
 
 async def download_url(db: AsyncSession, file: File) -> str:
-    """A short-lived signed URL, but only if the scan status permits it.
+    """A short-lived signed URL, but only if the scan result permits it.
 
     Architecture.md §3 is the single source of truth for whether bytes may be served.
-    `pending` and `flagged` are never downloadable, including to the owner.
+    The decision is made against the **version**, not `files.scan_status`: since M4 an
+    admin override recorded on a version can permit a download that its status alone
+    would refuse, and the override deliberately lives only on the version so there is
+    one place that says whether access was granted (Schema.md §7).
     """
-    if not file.scan_status.is_downloadable:
-        raise FileError(
-            f"This file cannot be downloaded while its scan status is "
-            f"'{file.scan_status.value}'."
-        )
     if file.current_version_id is None:
         raise FileError("This file has no completed upload yet.")
     version = await db.get(FileVersion, file.current_version_id)
     if version is None or version.deleted_at is not None:
         raise FileError("This file has no completed upload yet.")
+    if not scan.version_is_downloadable(version):
+        raise FileError(scan.download_refusal_reason(version))
     return storage.generate_download_url(version.storage_key, download_filename=file.name)
 
 
