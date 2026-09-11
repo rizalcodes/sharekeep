@@ -15,10 +15,12 @@ it that decides.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -33,6 +35,10 @@ from app.models.enums import (
 from app.models.identity import Notification, User, Workspace, WorkspaceMember
 
 logger = logging.getLogger(__name__)
+
+# Links in rendered bodies. Our own URLs only ever contain [A-Za-z0-9_\-./:#=%?],
+# so stopping at whitespace is exact rather than heuristic.
+_URL = re.compile(r"https?://[^\s<]+")
 
 
 @dataclass(frozen=True)
@@ -311,7 +317,12 @@ def _body_for(notification: Notification) -> tuple[str, list[str]]:
     workspace = payload.get("workspace_name", "a workspace")
 
     if notification.type is NotificationType.WORKSPACE_INVITATION:
-        url = _app_url(f"/invitations?token={payload.get('token', '')}")
+        # The FRAGMENT, not the query string (Architecture.md §4.6). A fragment is the one
+        # part of a URL no server receives, so neither the frontend server nor the VPS
+        # reverse proxy can write the token into an access log. The first version of this
+        # line used `?token=` — against the very rule §4.6 exists to state — and pointed
+        # at a page that did not exist.
+        url = _app_url(f"/invitations#token={quote(str(payload.get('token', '')), safe='')}")
         return (
             f"{payload.get('inviter_name', 'Someone')} invited you to {workspace}",
             [
@@ -418,7 +429,14 @@ def render(notification: Notification, *, redirected_from: str | None = None) ->
     text = "\n\n".join(text_parts)
 
     escaped = [
-        p.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        _URL.sub(
+            # A real anchor, not bare text: whether bare text becomes clickable is up to
+            # each mail client, and an invitation that cannot be opened is the defect
+            # this milestone already shipped once. Applied after escaping, so the only
+            # markup in a paragraph is the anchor this line adds.
+            lambda m: f'<a href="{m.group(0)}" style="color:#1E3A5F">{m.group(0)}</a>',
+            p.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"),
+        )
         for p in paragraphs
     ]
     html_banner = (

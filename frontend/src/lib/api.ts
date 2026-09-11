@@ -3,6 +3,7 @@ import type {
   AuditPage,
   FolderListing,
   FolderOut,
+  InvitationPreview,
   InFlightUpload,
   Quota,
   ResumeState,
@@ -87,10 +88,24 @@ export async function apiFetch<T>(
 // --- Auth -------------------------------------------------------------------
 
 export const auth = {
-  signup: (email: string, password: string, fullName: string) =>
+  /**
+   * With an invitation token the server takes the address from the invitation and
+   * ignores `email`, so the form shows it locked rather than letting it be typed.
+   */
+  signup: (
+    email: string,
+    password: string,
+    fullName: string,
+    invitationToken?: string,
+  ) =>
     apiFetch<Session>("/auth/signup", {
       method: "POST",
-      body: JSON.stringify({ email, password, full_name: fullName }),
+      body: JSON.stringify({
+        email,
+        password,
+        full_name: fullName,
+        ...(invitationToken ? { invitation_token: invitationToken } : {}),
+      }),
     }),
   login: (email: string, password: string) =>
     apiFetch<Session>("/auth/login", {
@@ -199,6 +214,24 @@ export const publicShare = {
         body: JSON.stringify(password ? { password } : {}),
       },
     ),
+};
+
+// --- Invitations ------------------------------------------------------------
+//
+// The token always travels in a POST body, never in a path or query string: those are
+// written verbatim into every access log on the way (Architecture.md §4.6).
+
+export const invitations = {
+  preview: (token: string) =>
+    apiFetch<InvitationPreview>("/invitations/preview", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+  accept: (token: string) =>
+    apiFetch<unknown>("/invitations/accept", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
 };
 
 // --- Activity log -----------------------------------------------------------

@@ -2,14 +2,25 @@
 
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ApiError, auth } from "@/lib/api";
+import {
+  clearPendingInvitation,
+  readPendingInvitation,
+  type PendingInvitation,
+} from "@/lib/pending-invitation";
 
 type Mode = "login" | "signup";
 
 /**
  * Deliberately plain (Design.md §5). A security product's sign-in screen should look
  * unremarkable and legible rather than designed.
+ *
+ * Also the middle of an invitation, when one is pending (Architecture.md §4.6). Sign-up
+ * then carries the token and shows the invited address **locked**: the server takes the
+ * address from the invitation and ignores the typed one, so an editable field would let
+ * someone believe they had registered a different address. Sign-in returns to the
+ * invitation page afterwards, where joining is an explicit click.
  */
 export function AuthForm({ mode }: { mode: Mode }) {
   const router = useRouter();
@@ -18,8 +29,25 @@ export function AuthForm({ mode }: { mode: Mode }) {
   const [fullName, setFullName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pending, setPending] = useState<PendingInvitation | null>(null);
 
   const isSignup = mode === "signup";
+
+  // Read after mount, not during render: sessionStorage does not exist on the server,
+  // and a first render that differs between server and client is a hydration mismatch.
+  // Deferred a tick so no state is set synchronously inside the effect.
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (cancelled) return;
+      const found = readPendingInvitation();
+      setPending(found);
+      if (found?.email) setEmail(found.email);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -27,11 +55,15 @@ export function AuthForm({ mode }: { mode: Mode }) {
     setBusy(true);
     try {
       if (isSignup) {
-        await auth.signup(email, password, fullName);
+        await auth.signup(email, password, fullName, pending?.token);
+        // Sign-up with the token accepts the invitation in the same transaction.
+        if (pending) clearPendingInvitation();
+        router.push("/files");
       } else {
         await auth.login(email, password);
+        // Back to the invitation, where joining is an explicit click.
+        router.push(pending ? "/invitations" : "/files");
       }
-      router.push("/files");
       router.refresh();
     } catch (caught) {
       setError(
@@ -55,6 +87,26 @@ export function AuthForm({ mode }: { mode: Mode }) {
           : "Secure File Sharing Platform"}
       </p>
 
+      {pending && (
+        <div className="mt-6 rounded-md border border-border bg-surface px-3 py-2.5 text-sm text-ink-muted">
+          {isSignup ? "Creating an account to join " : "Signing in to join "}
+          <span className="font-medium text-ink">
+            {pending.workspaceName ?? "a workspace"}
+          </span>
+          .{" "}
+          <button
+            type="button"
+            onClick={() => {
+              clearPendingInvitation();
+              setPending(null);
+            }}
+            className="text-primary underline underline-offset-2"
+          >
+            Continue without the invitation
+          </button>
+        </div>
+      )}
+
       <form onSubmit={submit} className="mt-8 flex flex-col gap-4">
         {isSignup && (
           <Field
@@ -72,6 +124,12 @@ export function AuthForm({ mode }: { mode: Mode }) {
           onChange={setEmail}
           autoComplete="email"
           required
+          readOnly={isSignup && Boolean(pending?.email)}
+          hint={
+            isSignup && pending?.email
+              ? "Set by your invitation. It only works for this address."
+              : undefined
+          }
         />
         <Field
           label="Password"
@@ -129,6 +187,7 @@ function Field({
   hint?: string;
   autoComplete?: string;
   required?: boolean;
+  readOnly?: boolean;
 }) {
   return (
     <label className="flex flex-col gap-1.5">
@@ -138,7 +197,7 @@ function Field({
         type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink outline-none transition-colors focus:border-primary"
+        className="rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink outline-none transition-colors focus:border-primary read-only:bg-surface-sunken read-only:text-ink-muted"
       />
       {hint && <span className="text-xs text-ink-subtle">{hint}</span>}
     </label>

@@ -8,7 +8,9 @@ validation against Resend covers the parts only the provider can answer.
 
 from __future__ import annotations
 
+import re
 import uuid
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 from sqlalchemy import select
@@ -638,3 +640,145 @@ async def test_delivery_is_dispatched_only_after_the_transaction_commits(
 
     row = (await _queued(db, ws, NotificationType.WORKSPACE_INVITATION))[0]
     assert dispatched[0][1] == (str(row.id),)
+
+
+# --- Following the link in the email (added after M6 was first marked done) ------
+#
+# The first M6 suite asserted the token was *in* the invitation email and stopped. The
+# link pointed at a page that did not exist, with the token in a query string that
+# Architecture §4.6 forbids. These tests start from the rendered email a person would
+# receive, take the token out of the link in it, and carry it all the way to membership
+# — never using the token the API returned, because the email is the only copy the
+# invitee ever has.
+
+LINK = re.compile(r"https?://\S+/invitations\S*")
+
+
+async def _emailed_link(client, db, ws: str, invitee: str, role=WorkspaceRole.EDITOR):
+    """Invite someone, then return (url, token) exactly as the email presents them."""
+    created = await client.post(
+        f"{WS}/{ws}/invitations", json={"email": invitee, "role": role.value}
+    )
+    assert created.status_code == 201, created.text
+
+    row = next(
+        r
+        for r in await _queued(db, ws, NotificationType.WORKSPACE_INVITATION)
+        if r.email == invitee
+    )
+    rendered = notifications.render(row)
+
+    found = LINK.findall(rendered.text)
+    assert len(found) == 1, f"expected one invitation link in the email, found {found}"
+    url = found[0]
+    # The same link must be what the HTML version shows, or the two parts of one email
+    # would disagree about where to go — and it must be a real anchor there, not bare
+    # text a mail client may or may not choose to make clickable.
+    assert f'href="{url}"' in rendered.html
+
+    fragment = urlsplit(url).fragment
+    token = unquote(parse_qs(fragment)["token"][0])
+    # The emailed token is the live one, not a stale or placeholder value.
+    assert token == created.json()["token"]
+    return url, token
+
+
+async def test_the_emailed_link_carries_its_token_only_in_the_fragment(make_client, db):
+    """Architecture §4.6: an invitation token never travels in a URL a server can log.
+
+    A fragment is the one part of a URL no server receives. The path and query — both of
+    which a frontend server and a reverse proxy write to their access logs — must not
+    contain it.
+    """
+    client, ws, _ = await _workspace(make_client, "m6f-frag@example.com")
+    url, token = await _emailed_link(client, db, ws, "m6f-frag-invitee@example.com")
+
+    parts = urlsplit(url)
+    assert parts.path == "/invitations"
+    assert parts.query == "", "the token (or anything) is in the query string"
+    assert token not in parts.path
+    assert token not in parts.query
+    assert parts.fragment.startswith("token=")
+    # It links into the configured frontend, not the API.
+    assert url.startswith(settings.frontend_origin.rstrip("/") + "/invitations")
+
+
+async def test_a_new_user_follows_the_emailed_link_and_joins(make_client, db):
+    owner, ws, _ = await _workspace(make_client, "m6f-owner1@example.com")
+    _, token = await _emailed_link(owner, db, ws, "m6f-newcomer@example.com")
+
+    visitor = await make_client()
+    preview = await visitor.post("/api/v1/invitations/preview", json={"token": token})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["workspace_name"] == "Notified"
+    assert preview.json()["email"] == "m6f-newcomer@example.com"
+    assert preview.json()["requires_signup"] is True
+
+    # The body's email is deliberately different: the server takes the address from the
+    # invitation, which is why the sign-up form shows it locked (Design.md §5).
+    joined = await visitor.post(
+        "/api/v1/auth/signup",
+        json={
+            "email": "typed-something-else@example.com",
+            "password": "correct-horse-battery-staple",
+            "full_name": "Newcomer",
+            "invitation_token": token,
+        },
+    )
+    assert joined.status_code == 201, joined.text
+    session = joined.json()
+    assert session["user"]["email"] == "m6f-newcomer@example.com"
+
+    membership = {w["id"]: w["role"] for w in session["workspaces"]}
+    assert membership.get(ws) == WorkspaceRole.EDITOR.value
+
+    # And the invitation is spent: the same emailed link cannot be used twice.
+    again = await (await make_client()).post(
+        "/api/v1/invitations/preview", json={"token": token}
+    )
+    assert again.status_code == 404
+
+
+async def test_an_existing_user_follows_the_emailed_link_and_accepts(make_client, db):
+    owner, ws, _ = await _workspace(make_client, "m6f-owner2@example.com")
+    invitee, _ = await new_user(make_client, "m6f-existing@example.com")
+    _, token = await _emailed_link(owner, db, ws, "m6f-existing@example.com")
+
+    preview = await invitee.post("/api/v1/invitations/preview", json={"token": token})
+    assert preview.status_code == 200
+    assert preview.json()["requires_signup"] is False
+
+    accepted = await invitee.post("/api/v1/invitations/accept", json={"token": token})
+    assert accepted.status_code == 200, accepted.text
+
+    workspaces = (await invitee.get("/api/v1/workspaces")).json()
+    assert any(w["id"] == ws and w["role"] == "editor" for w in workspaces)
+
+
+async def test_the_emailed_link_is_useless_to_a_different_signed_in_user(make_client, db):
+    """An invitation is a grant to one address, not a bearer token for whoever holds
+    the email — a forwarded invitation must not let someone else join."""
+    owner, ws, _ = await _workspace(make_client, "m6f-owner3@example.com")
+    _, token = await _emailed_link(owner, db, ws, "m6f-intended@example.com")
+
+    forwarded_to, _ = await new_user(make_client, "m6f-forwarded@example.com")
+    refused = await forwarded_to.post("/api/v1/invitations/accept", json={"token": token})
+    assert refused.status_code == 403
+
+    workspaces = (await forwarded_to.get("/api/v1/workspaces")).json()
+    assert all(w["id"] != ws for w in workspaces)
+
+
+async def test_a_revoked_invitations_emailed_link_stops_working(make_client, db):
+    owner, ws, _ = await _workspace(make_client, "m6f-owner4@example.com")
+    _, token = await _emailed_link(owner, db, ws, "m6f-revoked@example.com")
+
+    listed = (await owner.get(f"{WS}/{ws}/invitations")).json()
+    invitation_id = next(i["id"] for i in listed if i["email"] == "m6f-revoked@example.com")
+    revoked = await owner.delete(f"{WS}/{ws}/invitations/{invitation_id}")
+    assert revoked.status_code in (200, 204)
+
+    preview = await (await make_client()).post(
+        "/api/v1/invitations/preview", json={"token": token}
+    )
+    assert preview.status_code == 404

@@ -11,7 +11,7 @@ has actually been performed, not when the code merely exists (Rules.md §6).
 | M3 | Upload UX: drag & drop, per-chunk progress, retry/resume, auth UI, folder browser | **Done** (9 Sep 2026) |
 | M4 | Malware scanning (Celery + VirusTotal) + file versioning | **Done** (10 Sep 2026) |
 | M5 | Sharing: 4 link types, password protection, expiry, modifiers | **Done** (11 Sep 2026) |
-| M6 | Audit log UI + email notifications (Resend) | **Done** (11 Sep 2026) |
+| M6 | Audit log UI + email notifications (Resend) | **Done** (12 Sep 2026) — first marked Done on 11 Sep in error; see the M6 record |
 | M7 | Search/filter, frontend polish, design pass | Not started |
 | M8 | Deployment to the shared VPS, end-to-end verification | Not started |
 
@@ -721,7 +721,9 @@ The repo's own `frontend/AGENTS.md` exists to prompt exactly that check.
 ## M6 — Audit log UI + email notifications (Resend) · Done
 
 Branch `feature/m6-audit-notifications`. Status: complete, verified against the live
-stack including real Resend sends.
+stack including real Resend sends and a real browser. **First marked Done on 11
+September with every invitation link broken**; corrected on 12 September — see
+"Found after M6 was first marked done" below.
 
 ### Verified rather than assumed, before designing
 
@@ -816,10 +818,12 @@ Found while reading rather than while building, and all fixed here:
 
 | Check | Result |
 |---|---|
-| Backend suite | 282 passing (from 237), 0 skipped, ruff clean |
-| Frontend | eslint clean, `tsc --noEmit` clean, production build clean across 8 routes |
+| Backend suite | 287 passing (from 237 at the end of M5), 0 skipped, ruff clean |
+| Frontend | eslint clean, `tsc --noEmit` clean, production build clean across 9 routes |
 | Migration | upgrade, downgrade, re-upgrade clean; parity test confirms it matches the models |
-| End-to-end | 31 checks against the live worker and live Resend, all passing |
+| End-to-end | 31 checks against the live worker and live Resend, all passing, re-run after the fix |
+| Browser | 28 checks in real Chrome, starting from the link in the rendered email |
+| Permanent failure | 12 checks through the real worker with the redirect off, then restored |
 
 The live run proved the parts a stub cannot. An invitation queued by the API was picked
 up by the **separate worker process** and accepted by Resend, with the provider's message
@@ -877,6 +881,83 @@ applies with more at stake: an un-stubbed dispatch against a live worker running
 code would not merely be rejected as unregistered — it would send real email to whatever
 address a fixture invented, on every test run.
 
+### Found after M6 was first marked done
+
+M6 was first recorded as Done on 11 September (commit `028e0a3`). That was premature,
+and this section exists so the record says so rather than quietly absorbing the fix.
+
+**Every invitation email linked to a 404, and put its token where §4.6 forbids it.**
+Found on 12 September by re-checking the finished milestone before the merge, not by any
+test. The email linked to `/invitations?token=…`; no such page existed, and nothing in
+the frontend read an invitation token at all. The query string also contradicted
+Architecture §4.6, whose M1 rule — found by inspecting real container logs — is that an
+invitation token never travels in a URL a server can log. A frontend server and a
+reverse proxy log a query exactly as faithfully as a path.
+
+Why it got through is the part worth keeping. The suite asserted the token was *in* the
+email. The live run proved Resend *accepted* the email. Both were true, and neither
+followed the link. "The provider accepted it" had been proven; "the reader can use it"
+had not been checked by anyone. Earlier in this same milestone I had told the developer
+to try inviting someone — had they clicked the link in that email, it would have 404'd.
+
+The fix:
+
+- The link carries the token in the **URL fragment** (`/invitations#token=…`), which no
+  server ever receives. §4.6 and Rules §3 now say so.
+- A new `/invitations` page reads the fragment, scrubs it from the address bar at once,
+  holds the token in `sessionStorage` across a sign-in or sign-up, and sends it only in
+  POST bodies. It names the workspace, role and invited address before anything happens,
+  and joining is one explicit click.
+- Sign-up carries the token and shows the invited address **locked**, because the server
+  takes the address from the invitation and ignores the typed one. Sign-in returns to the
+  invitation page afterwards.
+- In the HTML body, links are now real `<a href>` anchors. Before, they were bare text,
+  so whether they could be clicked at all was left to each mail client — the same class
+  of fault in a different place.
+
+**Verified in a real browser, starting from the email.** The link is taken from the
+stored notification rendered by the same code the worker used for the message Resend
+accepted, never from the API response. Installed Chrome, driven by `playwright-core`
+from outside the project, against the live stack — 28 checks:
+
+- A new person opens the link, sees the workspace named, creates an account with the
+  address locked, lands on the files page as an editor, and the invitation is spent.
+- Someone with an account opens it signed out, signs in with the address prefilled, is
+  returned to the invitation rather than to the files page, is still not a member, and
+  becomes one only on clicking Join.
+- A forwarded email opened by a different signed-in user is told plainly the invitation
+  is for another address, is offered no Join button, and does not become a member.
+- A link with no token says it is incomplete; a tampered token says it cannot be used.
+- Across 71 recorded requests the token appeared in **no** URL; it left the browser only
+  in POST bodies to `/invitations/preview`, `/invitations/accept` and `/auth/signup`. None
+  of the tokens appears anywhere in the backend or frontend logs.
+
+The five new backend tests follow the same path through the API, and a **negative
+control** proved they are not decoration: with the old query-string link restored inside
+the container, all five failed.
+
+**The browser test found a second defect the fix itself had.** Someone who sees "This
+link is incomplete" and pastes the full link into the same tab triggers a fragment-only
+navigation — the browser does not reload, so the page kept saying "incomplete" beside a
+perfectly good link. The page now listens for `hashchange`. Proven both ways: the first
+browser run failed on exactly this, the second passed.
+
+One failure in that first run was mine rather than the product's: the sign-in check read
+the email field before the form had loaded the pending invitation. With the test waiting
+for the form's "Signing in to join" notice first, the field is correctly prefilled.
+
+**The permanent-failure path was proven end to end through the real worker.** With the
+redirect on, the sandbox's owner-only 403 cannot occur inside the pipeline, so this had
+only been proven in halves. The redirect was switched off — confirmed from inside the
+worker, not just in `.env` — and an invitation queued to an unregistered domain. The
+real worker attempted it once, Resend refused it with 403, and the row was marked
+`failed` with the provider's own wording, no `sent_at` and no message id. Handing the
+same row straight back to the worker returned `already_failed` without contacting the
+provider, a sweep run through the worker dispatched nothing, and `attempts` stayed at 1.
+The invitation itself remained pending — a refused email does not cost the invitee
+their invitation. The redirect was then restored, confirmed from inside the worker again,
+and the full live M6 run repeated with redirected delivery recorded as before.
+
 ### Open at the end of M6
 
 - **`status = sent` means the provider accepted it, not that it was delivered.** The
@@ -894,3 +975,11 @@ address a fixture invented, on every test run.
   nothing prunes them. Not a concern at portfolio scale, but it is unbounded growth.
 - **The audit log has no export.** Reading it in the browser is the only route.
 - **A revocation of access sends no email.** v1 notifies on gaining access only.
+- **Email links point at `FILESHARE_FRONTEND_ORIGIN`**, which is `http://localhost:3000`
+  in development. M8 must set it to the public URL, or every link in every email will
+  point at the recipient's own machine.
+- **The invitation link was proven in a real browser against the rendered email, not
+  clicked from an actual inbox.** The developer confirmed the email's appearance in
+  Gmail; clicking its link there is the one step no script here can take.
+- **After joining, the files page opens on the first workspace, not the new one.** The
+  new workspace is in the switcher, and the confirmation page says so.

@@ -229,3 +229,14 @@ export type AuditPage = {
   /** Sign-ins belong to the account, not the workspace, so they are never here. */
   excludes_account_events: boolean;
 };
+
+// --- Invitations (Architecture.md §4.6) ---------------------------------------
+
+/** What a token holder may learn before signing in: nothing about members or files. */
+export type InvitationPreview = {
+  workspace_name: string;
+  email: string;
+  role: WorkspaceRole;
+  expires_at: string;
+  requires_signup: boolean;
+};
