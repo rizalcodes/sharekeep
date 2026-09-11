@@ -300,6 +300,10 @@ M8 stays deployment.
 5. **An owner may lower the workspace quota but not raise it past the platform ceiling.**
    §8's "configurable at the workspace level" stands; a limit the limited party can lift
    at will was not a limit. Found while designing the settings page (Architecture §4.6).
+6. **Deleting a workspace purges its storage prefix in a background task**, which is
+   what §8's per-workspace prefix was chosen for. Probed first: Supabase supports
+   paginated listing under a prefix but **refuses** S3's batch delete, so cleanup is one
+   request per object — a background job, not part of the delete request.
 
 ### Gaps found in the process, all closed in M7
 

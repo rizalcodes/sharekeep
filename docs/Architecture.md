@@ -469,6 +469,27 @@ which is what makes the sweep idempotent and lets restore refuse cleanly: a batc
 any purged version says the files are gone for good rather than reviving rows whose
 bytes no longer exist.
 
+## 6c. Deleting a workspace (specified in v1.10, M7)
+
+Deleting a workspace removes its rows outright — it is the one delete in this system that
+is not soft — and until M7 it left **every object in storage with nothing left to find
+them by**: the retention sweep looks for `file_versions` rows, and the cascade had just
+deleted them. Worse than the leak §6b fixed, because that one is at least discoverable.
+
+PRD §8 chose per-workspace key prefixes (`workspace_id/file_id/version_id/filename`)
+partly for "simpler workspace-deletion cleanup". That is what this is. After the rows
+are committed, a Celery task walks the workspace's prefix and deletes each object.
+
+**Objects are deleted one request at a time.** Verified against the live bucket:
+paginated `list_objects_v2` under a prefix works, and `delete_objects` — S3's batch
+delete — is **refused** by Supabase. So a workspace with a thousand retained versions
+costs a thousand requests, which is why this is a background task and not part of the
+request that returns 204.
+
+The residual risk is stated rather than designed away: if the task and its retries all
+fail, those objects are orphaned with no row referring to them. The task is idempotent
+(deleting an absent key succeeds on S3), so a re-run is always safe.
+
 ## 7. Deployment Architecture
 
 **Compose layout (decided at kickoff, 7 Sep 2026):** this project ships its **own** `docker-compose.yml` under its own Compose project name, on the same VPS as the paused n8n project — *not* merged into the n8n project's compose file. Same isolation intent as `Rules.md` §7, safer mechanics: no edit to a live stack's compose file, independent `up`/`down`/restart, and no chance of an unrelated change taking n8n's services with it. The two stacks meet only at an **external Docker network** shared with the existing reverse proxy.
@@ -771,5 +792,7 @@ Five things in *this* document were missing or wrong, and are fixed before any c
 7. **Quota could be raised by the workspace's own owner without bound** (§4.6). Now
    lower-only, decided by the developer.
 8. **Leaving a workspace was implied and missing** (§4.6).
+9. **Deleting a workspace orphaned every object it held** (§6c). Found while building
+   the settings page that offers the button.
 6. **The retention sweep was documented and never built** (§6b). Found while specifying
    the trash, because "whether it can still be restored" depends on it.
