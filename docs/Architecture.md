@@ -2,7 +2,7 @@
 
 **Scope note:** system/service design — how components interact, the background job pipeline, security architecture. Not data structure (`Schema.md`) or naming/conventions (`Rules.md`).
 
-**Version:** v1.9 — audit-log reading and the notification pipeline specified at the start of M6, 11 September 2026 (see §18). Previously v1.8 (share-link resolution, §17). Previously v1.7 (scan pipeline, §16). Previously v1.6 (frontend build-time configuration, §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
+**Version:** v1.10 — search, version rollback and the trash specified at the start of M7, 12 September 2026 (see §19). Previously v1.9 (audit-log reading and the notification pipeline, §18). Previously v1.8 (share-link resolution, §17). Previously v1.7 (scan pipeline, §16). Previously v1.6 (frontend build-time configuration, §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
 
 ---
 
@@ -138,7 +138,9 @@ Specified in v1.3 — v1.2 committed only to "JWTs in httpOnly, Secure, SameSite
 
 ### 4.1 Effective role resolution (authenticated user)
 
-Resolved in strict precedence order — **first match wins**, more specific always beats less specific:
+**Membership is a precondition, checked first** (v1.10). A grant refines a member's role; it never admits a non-member. Enforced at both layers — the grant routes refuse a non-member, and the resolver denies one regardless of any grant row — because §4.8's argument that search needs no per-row permission filter rests on it.
+
+Then, resolved in strict precedence order — **first match wins**, more specific always beats less specific:
 
 1. An explicit `file_permissions` grant on the file itself.
 2. An explicit `file_permissions` grant on the file's folder, then its parent, then its grandparent — **nearest ancestor wins**. A grant on a deep subfolder overrides a grant on the workspace root, including when the nearer grant is *less* permissive. Most-permissive-wins is explicitly rejected: it makes a narrowing grant silently ineffective, which is a security failure mode.
@@ -260,6 +262,79 @@ append-only and time-ordered, so a cursor is both cheaper and stable under concu
 writes, where an offset shifts every time a new row lands. The `(workspace_id, created_at)`
 index added in M1 serves exactly this query.
 
+### 4.8 Search (specified in v1.10, M7)
+
+PRD §4 scoped search to "filename/metadata/tag" and ruled out document contents. The
+architecture had no section on it at all; this is that section.
+
+**What is searched.** The file name (case-insensitive substring) and tags (exact match on
+the normalised tag). **Metadata**, which the PRD never defined, is defined here as five
+filters, all combinable with each other and with the text query:
+
+| Filter | Source | Notes |
+|---|---|---|
+| Type | `files.mime_type`, mapped to a category (document, spreadsheet, presentation, image, video, audio, archive, other) | A category, not a raw mime string: nobody searches for `application/vnd.openxmlformats-officedocument.wordprocessingml.document`. The mapping lives in one server-side function so the filter and the result label cannot disagree. |
+| Size | `files.size_bytes` | The **current** version's size, which is what a reader means by "how big is it". |
+| Modified | `files.updated_at` range | |
+| Uploaded by | `files.created_by` | Any member of the workspace. |
+| Scan status | `files.scan_status` | Lets an owner find everything flagged or waiting in one step. |
+
+Folders match by name too, so a search for "invoices" finds the folder as well as files
+called that. Every result carries its location as a breadcrumb, because a result list that
+does not say *where* each file lives forces the reader to open each one to find out.
+
+**Who sees what.** Search is scoped to the active workspace and requires membership, the
+same dependency every workspace endpoint uses. That is sufficient, and the reason is worth
+stating rather than assuming: roles are only `viewer`, `editor` and `owner`, so an explicit
+grant can narrow a member's role on an item but can never hide it — every member resolves
+to at least `viewer` on every file (§4.1). Visibility in this system is therefore
+membership, and search needs no per-row permission join. If a "no access" role is ever
+added, this section is the first thing that must change.
+
+This argument depended on a rule the code did not enforce until M7: that a grant can only
+be held by a member (§4.1, Schema §8). Before M7 the grant route accepted any user, and the
+resolver honoured a grant without checking membership. Nothing could use it, because every
+workspace endpoint refused non-members first — but search must not become the first
+endpoint that honours one.
+
+**What is never returned.** Soft-deleted files and folders; files whose containing folder
+chain includes a deleted folder; and files with no completed upload (`current_version_id
+IS NULL`), which are uploads in flight rather than files.
+
+**Matching.** `ILIKE '%term%'` cannot use a B-tree index, so the name column gets a trigram
+GIN index (`pg_trgm`, shipped with the official Postgres image). Tag filtering uses the GIN
+index on `files.tags` that has existed since M2. Results are ordered by relevance — exact
+name match, then prefix, then substring — and then by `updated_at`, and paged by keyset
+like the audit log. The query string is capped at 200 characters and the `%`/`_`
+wildcards in it are escaped: a user typing `50%` is searching for those characters, not
+asking the database to match everything.
+
+### 4.9 Version rollback (specified in v1.10, M7)
+
+PRD §4 promised "rollback to a prior version". It was never built: `current_version_id`
+was only ever assigned at upload completion, and PRD §10b's note that M2 "delivered
+versions … and restore" referred to restoring from the trash. The audit action that trash
+restore writes is named `version_restored`, which is how the two were confused.
+
+**Restoring version *k* copies it forward as a new version.** The object is copied
+server-side (`CopyObject`, verified against the live bucket before this was written: the
+copy is byte-identical and keeps its content type; `UploadPartCopy` also works for objects
+above the single-request copy limit), and a new `file_versions` row becomes current with
+`restored_from_version_id` pointing at *k*. History stays linear and is never rewritten;
+"current" is always the newest version; and a share link, which tracks the file, serves
+the restored content from then on.
+
+Consequences stated rather than discovered:
+
+- **It consumes quota and a retention slot**, exactly as re-uploading the same bytes
+  would. Refused before any copy if the quota cannot absorb it.
+- **The scan verdict is reused, not re-requested.** The content is identical, so the
+  checksum is too, and the verdict cache (§3c) answers at zero VirusTotal cost. A copy of
+  a version that is `flagged` is refused: rollback must not be a way to launder a flagged
+  file into a new version that looks unscanned.
+- **Requires editor**, like any upload. Audited as `version_rolled_back`, distinct from
+  `version_restored` (trash), with both version numbers in the metadata.
+
 ## 5. Notification Pipeline
 
 Trigger events create a `notifications` row (`status = pending`); a Celery task delivers it
@@ -358,6 +433,19 @@ Soft delete exists so `audit_logs.target_id` always resolves (Schema.md §10). v
 - **Restore revives exactly one batch.** Restoring a folder does not resurrect items the user had deleted separately beforehand, because those carry a different batch id. Without this rule, restoring a folder would silently undo unrelated earlier decisions.
 - A restore is refused if it would exceed the workspace quota, or if the parent it would return to is itself deleted.
 - The retention sweep purges objects 30 days after `deleted_at`; after that the rows remain (for audit) but the bytes are gone and restore is no longer offered.
+
+## 6b. The trash (specified in v1.10, M7)
+
+§6a promised a user-visible trash; there was no endpoint to list it. `GET
+/workspaces/{id}/trash` returns deletion batches, newest first — one entry per delete
+operation, not per row, because restore works per batch and a list of individual rows
+would offer choices the restore cannot honour. Each entry names what was deleted (the
+folder or file the user actually chose), how many items it holds, who deleted it and when,
+and whether it can still be restored — refused once the retention sweep has purged the
+bytes, or when the parent it would return to is itself deleted, stating which.
+
+Visible to editors and owners, the roles that can delete. A viewer cannot restore
+anything, so a list of things they cannot act on would be noise.
 
 ## 7. Deployment Architecture
 
@@ -635,3 +723,26 @@ silently into the items above:
     the query string contradicted §4.6's own rule that an invitation token never travels
     in a URL a server can log. The link now uses the URL fragment, which no server ever
     receives, and §4.6 states how the acceptance page handles it.
+
+## 19. Amendment Log — v1.10 (12 Sep 2026, start of M7): search, rollback, trash
+
+Written after mapping every backend endpoint against what the frontend calls. The finding
+that shaped M7 is recorded in PRD §10e: most of v1's features had an API and no interface.
+Five things in *this* document were missing or wrong, and are fixed before any code:
+
+1. **Search had no section.** §4.8 now defines it, including the "metadata" the PRD
+   named and never defined, and the argument for why membership is sufficient scoping.
+2. **Grants could be held by non-members.** Schema §8 said a grant is "to a specific
+   workspace member"; the grant route accepted any user and the resolver honoured the
+   grant without checking membership. Inert until now, because every workspace endpoint
+   refused non-members first. §4.1 now makes membership a precondition at both layers —
+   the route refuses a non-member, and the resolver returns "denied" for one regardless
+   of grants — so search's safety argument does not rest on one of them alone.
+3. **Version rollback was promised and never built.** §4.9. Copy-forward, decided by the
+   developer over a pointer move; server-side copy was probed against the live bucket
+   first.
+4. **The trash could not be seen.** §6a promised it; §6b adds the list.
+5. **Grants could not be listed, and folder grants could not be revoked at all.** A
+   folder-level grant, once made, was permanent. That is a security defect rather than a
+   missing convenience: narrowing a grant is how access is taken away. Listing and
+   revoking are now specified alongside creation, for files and folders alike.

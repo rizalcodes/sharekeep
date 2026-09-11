@@ -262,6 +262,66 @@ rule, which is the only reason the failure path is testable. Six sends with no p
 no 429 despite a documented 2/second limit; the limiter follows the documented figure
 rather than the absence of an observed one.
 
+## 10e. M7 Scope and Decisions (12 Sep 2026, start of M7)
+
+### The finding that reshaped M7
+
+Before planning search and polish, every backend endpoint was mapped against what the
+frontend actually calls. The backend had been built out milestone by milestone since M1;
+the frontend had not followed. A signed-in user could upload, browse, create folders,
+share and read the activity log — and could **not download their own file** (the endpoint
+had existed since M2), see or roll back versions, rename, move, delete or restore
+anything, grant or revoke per-item permissions, invite anyone or manage members, release
+a flagged file, edit tags, or change workspace settings.
+
+§7 describes M7 as "search/filter, frontend polish, design pass". Polish presupposes that
+the thing being polished exists. **Decided: M7 absorbs the missing interface and is split
+into three stages**, each verified and committed separately and merged as one milestone:
+
+- **M7a — complete the interface** for the features v1 already has in the API.
+- **M7b — search and tags.**
+- **M7c — design pass and cross-page consistency**, last, so it polishes surfaces that
+  all exist.
+
+M8 stays deployment.
+
+### Decisions
+
+1. **"Metadata" in "filename/metadata/tag search" means five filters:** file type
+   category, size, modified date, uploader and scan status, combinable with each other
+   and with the name/tag query (Architecture §4.8). Not a per-folder scope filter.
+2. **Search covers the active workspace only**, matching the workspace switcher and
+   keeping the permission argument to one membership check.
+3. **CSRF double-submit tokens are M8**, decided with the deployment topology — the
+   strength of `SameSite=Lax` depends on the final domains, which Architecture §4.0
+   already constrains.
+4. **Version rollback copies the chosen version forward as a new version** rather than
+   moving the current-version pointer back (Architecture §4.9).
+
+### Gaps found in the process, all closed in M7
+
+- **Version rollback, promised in §4, was never built.** §10b's note that M2 "delivered
+  versions … and restore" was mine and was misleading: "restore" there meant restoring
+  from the trash, whose audit action happens to be named `version_restored`.
+- **The trash could not be seen.** Architecture §6a promised a user-visible trash; there
+  was only a restore endpoint, which needs a batch id the user had no way to find.
+- **Folder grants could be created and never revoked**, and no grant could be listed.
+- **Grants could be held by non-members**, against Schema §8. Inert until now; closed
+  before search exists.
+- **Tags had a count limit and no length limit**, and no interface at all.
+- **Two scan badges contradicted Design §5**: "Queued" rendered amber rather than
+  neutral, and "Scan failed" rendered in the same red as "Flagged" — so a scan that
+  merely failed to run was indistinguishable from malware.
+- **The permission indicator Design §5 asks for** — the viewer's role on an item, and
+  whether it is shared — did not exist, and the listing did not carry the data for it.
+
+### Verified rather than assumed
+
+Supabase's S3 endpoint was probed for server-side copy before rollback was designed on
+it: `CopyObject` produced a byte-identical object (SHA-256 compared) with its content type
+preserved, and `UploadPartCopy` works for the multipart case. The bytes of a rollback
+therefore never pass through our servers.
+
 ## 11. Next Steps
 
 1. ~~Draft `Schema.md`, `Rules.md`, `Architecture.md`, and `Design.md`.~~ Done.

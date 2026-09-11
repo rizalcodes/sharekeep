@@ -2,7 +2,7 @@
 
 **Scope note:** this document covers **data schema only** — field names, types, required/optional, and relations. Naming/credential conventions live in `Rules.md`; system/workflow design lives in `Architecture.md`.
 
-**Version:** v1.6 — amended 11 September 2026 at the start of M6. Previously v1.5 (start of M5), v1.4 (start of M4), v1.3 (start of M2), v1.2 (start of M1) and v1.1 (kickoff, before M0). See §15 for the amendment log.
+**Version:** v1.7 — amended 12 September 2026 at the start of M7. Previously v1.6 (start of M6), v1.5 (start of M5), v1.4 (start of M4), v1.3 (start of M2), v1.2 (start of M1) and v1.1 (kickoff, before M0). See §15 for the amendment log.
 
 **Conventions:**
 - snake_case for all field and table names, plural table names.
@@ -98,13 +98,13 @@ Represents the current/latest state of a file. Version history is in `file_versi
 | `size_bytes` | bigint | required | Size of the **current** version. Note this is *not* what the file consumes: quota counts every retained version (see §7 and Architecture §6). |
 | `current_version_id` | UUID | **optional** | → `file_versions.id`. Nullable by necessity: `file_versions.file_id` is required, so the file row must exist before its first version row. Set immediately after the first version is created, and non-NULL for every file that has completed an upload. |
 | `scan_status` | enum(`pending`, `scanning`, `clean`, `flagged`, `scan_skipped`, `scan_failed`) | required, default `pending` | Malware scan state of the current version (mirrors `file_versions.scan_status`) |
-| `tags` | text[] | required, default `{}` | Backs the tag half of PRD §4's "filename/metadata/tag search" |
+| `tags` | text[] | required, default `{}` | Backs the tag half of PRD §4's "filename/metadata/tag search". **Constrained v1.7:** at most 25 per file, each lowercased, trimmed and 1–40 characters of letters, digits, spaces, `-`, `_` or `.`. Before v1.7 only the count was limited, so one tag could be arbitrarily long |
 | `created_by` | UUID | required | → `users.id` |
 | `deleted_at` | datetime | optional | Soft delete |
 | `deletion_batch_id` | UUID | optional | **Added v1.3.** See `folders`. |
 | `created_at` / `updated_at` | datetime | required | — |
 
-**Constraints:** UNIQUE (`workspace_id`, `folder_id`, `name`) WHERE `deleted_at IS NULL` — this is what makes "re-upload with the same name creates a new version" well-defined. Same NULL-handling caveat as `folders`. GIN index on `tags`.
+**Constraints:** UNIQUE (`workspace_id`, `folder_id`, `name`) WHERE `deleted_at IS NULL` — this is what makes "re-upload with the same name creates a new version" well-defined. Same NULL-handling caveat as `folders`. GIN index on `tags`. **Trigram GIN index on `name`** (v1.7, `pg_trgm`) — search matches names by substring, which a B-tree cannot serve (Architecture §4.8).
 
 ## 7. `file_versions`
 
@@ -126,6 +126,7 @@ Represents the current/latest state of a file. Version history is in `file_versi
 | `scan_override_reason` | text | optional | **Added v1.4.** The stated justification, required when an override is recorded. |
 | `deleted_at` | datetime | optional | Soft delete; set when the parent file is deleted or a single version is pruned |
 | `deletion_batch_id` | UUID | optional | **Added v1.3.** See `folders`. |
+| `restored_from_version_id` | UUID | optional | **Added v1.7.** → `file_versions.id`. Set when this version was created by rolling back to an earlier one (Architecture §4.9). The content is a server-side copy of that version, so the UI can say so rather than presenting it as a new upload |
 | `created_at` | datetime | required | — |
 
 **Constraints:** UNIQUE (`file_id`, `version_number`). An override is either fully present or fully absent: `scan_override_at`, `scan_override_by` and `scan_override_reason` are all NULL, or all non-NULL.
@@ -148,7 +149,7 @@ drift permanently, turning the safety check into a standing false alarm.
 
 ## 8. `file_permissions`
 
-Explicit permission grants for a file or folder to a specific workspace member, overriding the workspace-level default role where present. Resolution order and inheritance are defined in Architecture §4.
+Explicit permission grants for a file or folder to a specific workspace member, overriding the workspace-level default role where present. **"Member" is enforced from v1.7**: until then the grant route accepted any user. Grants on files and on folders can each be listed and revoked — before v1.7 a folder grant, once created, could not be removed at all. Resolution order and inheritance are defined in Architecture §4.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
@@ -209,6 +210,8 @@ The CHECK enforces the type *requirements* only. It must not forbid the modifier
 The `share_accessed` / `share_access_denied` pair exists because Architecture §4.5 requires logging every resolution attempt, success **and** failure — the original enum had no way to express a failed attempt, which is precisely the event a security audit log exists to capture.
 
 Audit logs are append-only: no update or delete path in the application.
+
+**`version_restored` means restored from the trash**, despite its name — it is what M2's trash restore has always written. Rolling a file back to an earlier version is a different act and, from v1.7, writes `version_rolled_back`. The old name stays because the log is append-only and existing rows cannot be relabelled; the reader phrases it as "restored from the trash".
 **`metadata` carries a human-readable label for the target (convention added v1.6).**
 Every write denormalises the target's name — `label` for the thing acted on, plus whatever
 else the action needs. Resolving `target_id` to a name at read time instead would make an
@@ -460,3 +463,15 @@ Found reading v1.2 against what M2 has to build:
 
 No table was altered destructively: every added column is nullable or defaulted, so
 migration 0006 creates `notifications` and touches nothing that exists.
+
+### v1.7 (12 Sep 2026, start of M7)
+
+1. **`file_versions.restored_from_version_id`** (nullable, → `file_versions.id`). Set
+   on a version created by rolling back to an earlier one (Architecture §4.9), so the
+   history can say "restored from version 3" instead of presenting an identical upload.
+2. **`audit_action` gains `version_rolled_back`.** The existing `version_restored` has
+   always meant restore-from-trash; reusing it for rollback would make one action mean
+   two things in a log whose value is being unambiguous.
+3. **Tags are constrained per tag**, not only by count.
+4. **Trigram index on `files.name`** for substring search.
+5. **Grants are member-only in fact, not just in this document.**

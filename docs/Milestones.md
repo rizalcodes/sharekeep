@@ -12,7 +12,7 @@ has actually been performed, not when the code merely exists (Rules.md §6).
 | M4 | Malware scanning (Celery + VirusTotal) + file versioning | **Done** (10 Sep 2026) |
 | M5 | Sharing: 4 link types, password protection, expiry, modifiers | **Done** (11 Sep 2026) |
 | M6 | Audit log UI + email notifications (Resend) | **Done** (12 Sep 2026) — first marked Done on 11 Sep in error; see the M6 record |
-| M7 | Search/filter, frontend polish, design pass | Not started |
+| M7 | Complete the interface, search + tags, design pass (three stages, PRD §10e) | In progress |
 | M8 | Deployment to the shared VPS, end-to-end verification | Not started |
 
 ---
@@ -983,3 +983,27 @@ and the full live M6 run repeated with redirected delivery recorded as before.
   Gmail; clicking its link there is the one step no script here can take.
 - **After joining, the files page opens on the first workspace, not the new one.** The
   new workspace is in the switcher, and the confirmation page says so.
+
+## M7 — Complete the interface, search, design pass · In progress
+
+Branch `feature/m7-search-polish`. Split into three stages by decision (PRD §10e), each
+verified and committed on its own, merged together.
+
+### Why M7 is bigger than its line in the PRD
+
+Mapping every backend endpoint against the frontend showed that most of v1's features had
+an API and no interface — including downloading one's own file. Polish presupposes the
+surfaces exist, so M7 builds them first.
+
+### Plan
+
+| Stage | Scope | Status |
+|---|---|---|
+| M7a | App shell with a shared workspace selection; row menu with download, versions + rollback, rename, move, delete; trash; per-item permissions (list, grant, revoke — files and folders); members, roles and invitations; releasing a flagged file; workspace settings; sign out everywhere; the permission indicator; member-only grants | Not started |
+| M7b | Search over name and tags with the five metadata filters; trigram index; tag editor with per-tag limits | Not started |
+| M7c | Design pass across every page: scan badge colours corrected to Design §3/§5, file-type icons, table/grid toggle, folder drag-and-drop, the readiness page M0 never eyeballed, anti-slop audit | Not started |
+
+### Docs amended first
+
+Architecture v1.10 (§4.1 membership precondition, §4.8 search, §4.9 rollback, §6b trash,
+§19), Schema v1.7, PRD §10e, Design §3 and §5.
