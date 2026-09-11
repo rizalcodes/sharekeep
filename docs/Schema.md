@@ -2,7 +2,7 @@
 
 **Scope note:** this document covers **data schema only** — field names, types, required/optional, and relations. Naming/credential conventions live in `Rules.md`; system/workflow design lives in `Architecture.md`.
 
-**Version:** v1.5 — amended 11 September 2026 at the start of M5. Previously v1.4 (start of M4), v1.3 (start of M2), v1.2 (start of M1) and v1.1 (kickoff, before M0). See §15 for the amendment log.
+**Version:** v1.6 — amended 11 September 2026 at the start of M6. Previously v1.5 (start of M5), v1.4 (start of M4), v1.3 (start of M2), v1.2 (start of M1) and v1.1 (kickoff, before M0). See §15 for the amendment log.
 
 **Conventions:**
 - snake_case for all field and table names, plural table names.
@@ -209,22 +209,45 @@ The CHECK enforces the type *requirements* only. It must not forbid the modifier
 The `share_accessed` / `share_access_denied` pair exists because Architecture §4.5 requires logging every resolution attempt, success **and** failure — the original enum had no way to express a failed attempt, which is precisely the event a security audit log exists to capture.
 
 Audit logs are append-only: no update or delete path in the application.
+**`metadata` carries a human-readable label for the target (convention added v1.6).**
+Every write denormalises the target's name — `label` for the thing acted on, plus whatever
+else the action needs. Resolving `target_id` to a name at read time instead would make an
+append-only table mutable in effect: renaming a file would rewrite what this log says was
+downloaded last week. Rows written in M1–M5 are inconsistent here — `download` stored
+`file_name`, `delete` stored `name`, `upload` stored neither — and being append-only, they
+cannot be corrected. The reader states that the name was not recorded rather than
+inventing one or looking it up live (Architecture §4.7).
+
+**Who may read it:** workspace owners only, and account-level events (`workspace_id =
+NULL`) appear in no workspace log at all. Specified in Architecture §4.7 at M6, since §4.6
+covered administration and never mentioned reading.
 
 ## 11. `notifications`
 
-Designed to be channel-agnostic (WebSocket-ready for v1.1) even though v1 only sends email.
+Designed to be channel-agnostic (WebSocket-ready for v1.1) even though v1 only sends
+email. Built at M6; the delivery rules are Architecture §5b.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `id` | UUID | required | Primary key |
-| `user_id` | UUID | required | → `users.id`, the recipient |
+| `user_id` | UUID | optional | → `users.id`, the recipient. **Nullable since v1.6** — a workspace invitation is addressed to someone who may have no account yet, which is the whole point of inviting them |
+| `email` | string | required | **Added v1.6.** The address actually addressed. Resolved from `user_id` when there is one, and the invited address when there is not. Stored rather than derived so the log records where the mail was *sent*, not where it would be sent today — the same append-only reasoning as `audit_logs` labels (§10) |
 | `workspace_id` | UUID | optional | → `workspaces.id`; context for rendering and future per-workspace filtering |
-| `type` | enum(`file_shared`, `permission_granted`, `storage_quota_warning`, `scan_flagged`, `workspace_invitation`) | required | — |
-| `payload` | jsonb | required | Structured data for rendering the notification (e.g. file name, actor) |
+| `type` | enum(`file_shared`, `permission_granted`, `storage_quota_warning`, `scan_flagged`, `workspace_invitation`) | required | Recipients per event: Architecture §5a |
+| `payload` | jsonb | required | Structured data for rendering the notification (e.g. file name, actor). Denormalised at queue time for the same reason audit labels are |
 | `channel` | enum(`email`) | required, default `email` | Extensible for `websocket` in v1.1 without a schema change |
-| `status` | enum(`pending`, `sent`, `failed`) | required, default `pending` | — |
+| `status` | enum(`pending`, `sent`, `failed`) | required, default `pending` | `sent` means **the provider accepted it** — not that it was delivered. The restricted send-only API key cannot read a message's status back at all (Architecture §5b) |
+| `provider_message_id` | string | optional | **Added v1.6.** Resend's id for the accepted message. Exists precisely because our own record cannot answer a delivery question — a human can, from the provider's dashboard, with this |
+| `attempts` | integer | required, default 0 | **Added v1.6.** Incremented on every delivery attempt. On the row rather than only inside the Celery retry, so a worker restart does not lose the count and the sweep can still find the row |
+| `last_error` | string | optional | **Added v1.6.** The provider's own wording for the most recent failure, not a paraphrase. A permanent refusal is recorded and never retried |
+| `sent_at` | datetime | optional | **Added v1.6.** Set when the provider accepts. Also the **idempotency guard**: a row that has one is never sent again, claimed under a row lock. Without it, a task that succeeded and then died before committing would send a duplicate — and an email cannot be recalled |
+| `redirected_to` | string | optional | **Added v1.6.** Set when the sandbox redirect (Architecture §5c) diverted this message, recording where it actually went. A redirected send must never be mistaken for a real one |
 | `read_at` | datetime | optional | For future in-app read-state tracking |
 | `created_at` / `updated_at` | datetime | required | — |
+
+**Constraints:** index on (`status`, `created_at`) — the delivery task's only query is
+"oldest pending rows first". Index on (`user_id`, `created_at`) for a future in-app list.
+`user_id` is `ON DELETE CASCADE`: a deleted user's pending mail should not be sent.
 
 ## 12. `refresh_tokens`
 
@@ -295,7 +318,7 @@ files (1) ──< file_permissions
 folders (1) ──< file_permissions
 files (1) ──< share_links
 workspaces (1) ──< audit_logs
-users (1) ──< notifications
+users (1) ──< notifications          (user_id nullable: an invitation precedes the account)
 users (1) ──< refresh_tokens
 ```
 
@@ -408,3 +431,32 @@ Found reading v1.2 against what M2 has to build:
    rejecting `max_downloads = 0` (a link dead on creation is a mistake, not a state), and
    an explicit note that the type CHECK must not forbid modifiers on other types — the
    exact reading the v1.1 clarification was written to prevent.
+
+### v1.6 (11 Sep 2026, start of M6)
+
+1. **`notifications` gained delivery state: `attempts`, `last_error`, `sent_at`,
+   `provider_message_id`, `redirected_to`.** The original table could record *that* a
+   notification existed and a three-value status, but nothing about the attempt — so a
+   transient failure was indistinguishable from a permanent one, a worker restart lost the
+   retry count, and there was no way to tell a duplicate send from a first one. `sent_at`
+   doubles as the idempotency guard, which matters more here than elsewhere because an
+   email that has gone out cannot be recalled.
+2. **`status = sent` was defined down to what is knowable.** The Resend key in use is
+   restricted to sending: `GET /emails/{id}` returns 401. We cannot observe delivery, so
+   `sent` means the provider accepted the message and `provider_message_id` is stored for
+   a human to follow up with. The original field implied a delivery guarantee the
+   architecture cannot provide — the same overstatement §9's "uses, not downloads" was
+   written to avoid.
+3. **`notifications.user_id` became optional, and `email` was added.** A workspace
+   invitation is addressed to someone who by definition may not have an account yet, so a
+   required `user_id` made the pipeline unable to carry the one notification that M1 had
+   explicitly deferred to M6. The address is stored rather than derived, so the row records
+   where the mail was sent rather than where it would be sent today.
+4. **`audit_logs.metadata` must carry a `label` for its target (§10).** The log is
+   append-only, so resolving `target_id` to a name at read time would let a rename rewrite
+   history. M1–M5 wrote inconsistent metadata (`file_name`, `name`, or nothing) and cannot
+   be corrected in place; the convention applies going forward and the reader is honest
+   about older rows.
+
+No table was altered destructively: every added column is nullable or defaulted, so
+migration 0006 creates `notifications` and touches nothing that exists.

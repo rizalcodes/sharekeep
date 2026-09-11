@@ -197,6 +197,71 @@ metadata rather than what storage returns. Also confirmed: `PUT` against a downl
 is refused, an expired signature returns 400 rather than 403, and the URL discloses the
 full storage key to the recipient.
 
+## 10d. M6 Audit and Notification Decisions (11 Sep 2026, start of M6)
+
+Four decisions, plus four defects the docs had left standing and one provider constraint
+that changes what the pipeline can honestly claim.
+
+**1. The audit log is readable by workspace owners only.** Architecture §4.6 had specified
+who may administer a workspace and never mentioned who may read its history. The
+permissive reading is not a convenience: `audit_logs` holds the IP address and user agent
+of every share-link visitor, plus every member's activity pattern. Editors and viewers are
+refused 403 — the endpoint's existence is not secret, only its contents. Account-level
+events (`login`, `login_failed`, `logout`) carry `workspace_id = NULL` and so appear in no
+workspace log at all; a per-account session history is a separate surface, not in v1.
+
+**2. `file_shared` notifies only the recipient of a private link.** Public,
+password-protected and expiring links have nobody to notify — emailing the person who just
+pressed "create link" is noise dressed as a feature. Architecture §5 had listed "file
+shared" as a trigger without ever naming a recipient, which is answerable only for one of
+the four link types.
+
+**3. `scan_flagged` notifies the uploader *and* every workspace owner.** The uploader needs
+to know their file is being withheld; the owners need to know because §3d makes them the
+only people who can release it. Notifying one without the other leaves either the
+decision-maker uninformed or the affected user mystified. Deduplicated when they are the
+same person.
+
+**4. Mail is redirected to a single address in development.** The Resend sandbox permits
+exactly one recipient — the account owner. Without a redirect, five of the six trigger
+paths could never be exercised end to end, and "it compiles" would be the only evidence
+they work. When `notification_redirect_to` is set, every message goes there with a banner
+naming the intended recipient, and the row records that it was redirected so a redirected
+send is never counted as a real one. Off unless explicitly set.
+
+### Defects the docs had left standing, all fixed at M6
+
+- **`AuditAction.QUOTA_EXCEEDED` was never written by anything.** `quota.py` raised
+  `QuotaExceeded` and no audit row followed, so an audit reader would offer a filter that
+  could not match a single event. PRD §4 asks for every meaningful action to be logged, and
+  a refused upload is one.
+- **`storage_quota_warning_ratio = 0.9` had sat in the configuration since M0 with no
+  reader.** Now wired — as an upward crossing, not a state, or it would email the owners on
+  every upload for the life of the workspace.
+- **Invitations were never emailed.** M1 returned the raw token in the API response as an
+  explicit stopgap, with a code comment deferring the email to M6, while Architecture §4.0
+  had already reasoned about `SameSite=Lax` for the sake of a link in an email that did not
+  yet exist. M6 closes that.
+- **Audit metadata was inconsistent about names** — `download` stored `file_name`, `delete`
+  stored `name`, `upload` stored neither. A reader cannot render that uniformly, and
+  because the log is append-only the existing rows cannot be corrected. The convention now
+  requires a `label`, and the interface says the name was not recorded for older rows
+  rather than resolving it live, which would let a rename rewrite history.
+
+### Verified rather than assumed
+
+The Resend API was probed before anything was built on it, and two findings changed the
+plan. The configured sender `noreply@example.com` is refused **403** — every send would
+have failed, and not at some later milestone but immediately. And the key is restricted to
+sending: `GET /emails/{id}`, `/domains` and `/api-keys` all return 401, so **delivery
+cannot be read back at all**. `status = sent` therefore means only that the provider
+accepted the message, and the provider's message id is stored so a human can answer the
+delivery question from the dashboard. Resend's simulator addresses
+(`delivered@resend.dev`, `bounced@resend.dev`) are exempt from the owner-only recipient
+rule, which is the only reason the failure path is testable. Six sends with no pause drew
+no 429 despite a documented 2/second limit; the limiter follows the documented figure
+rather than the absence of an observed one.
+
 ## 11. Next Steps
 
 1. ~~Draft `Schema.md`, `Rules.md`, `Architecture.md`, and `Design.md`.~~ Done.

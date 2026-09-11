@@ -2,7 +2,7 @@
 
 **Scope note:** system/service design — how components interact, the background job pipeline, security architecture. Not data structure (`Schema.md`) or naming/conventions (`Rules.md`).
 
-**Version:** v1.8 — share-link resolution specified at the start of M5, 11 September 2026 (see §17). Previously v1.7 (scan pipeline, §16). Previously v1.6 (frontend build-time configuration, §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
+**Version:** v1.9 — audit-log reading and the notification pipeline specified at the start of M6, 11 September 2026 (see §18). Previously v1.8 (share-link resolution, §17). Previously v1.7 (scan pipeline, §16). Previously v1.6 (frontend build-time configuration, §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
 
 ---
 
@@ -61,7 +61,7 @@ Two separate concerns, deliberately two separate tasks (amended v1.7, see §16):
    - **Submission enabled**, `32MB < size <= 650MB` → obtain a large-file upload URL via `GET /files/upload_url`, submit, poll, verdict. *Reachable today: the 50MB per-file ceiling (PRD §10) sits above 32MB, so this branch is live and must be tested — only the >650MB branch is currently unreachable.*
    - `size > 650MB` → `scan_status = scan_skipped`, reason recorded.
 6. On a verdict: write `file_versions.scan_status` and, if this is the current version, `files.scan_status` → `clean` or `flagged`. Engine hit summary into `scan_detail`, and the verdict into the cache (§3c).
-7. If `flagged`: the file is **not** deleted automatically (same "don't auto-delete on an uncertain signal" principle used in the n8n project's stale-SKU handling). It is marked flagged, all access is blocked, an `audit_logs` entry (`scan_flagged`) is written, and a notification is queued. The only exit is an explicit admin override — §3d.
+7. If `flagged`: the file is **not** deleted automatically (same "don't auto-delete on an uncertain signal" principle used in the n8n project's stale-SKU handling). It is marked flagged, all access is blocked, an `audit_logs` entry (`scan_flagged`) is written, and a notification is queued to the uploader and every workspace owner (section 5a). The only exit is an explicit admin override — §3d.
 8. If the scan itself fails (API error, timeout): `scan_status = scan_failed`, retried with exponential backoff. After retries are exhausted the version stays inaccessible until a later successful scan or an admin override (§3d). **A rate-limit requeue is not a failure** and does not consume this retry budget (§3a).
 
 **Version bookkeeping.** Earlier drafts had the scan task "chain into version processing" to set `files.current_version_id`, `size_bytes` and `mime_type`. It does not: `complete_upload` sets those synchronously the moment the upload finishes (M2), long before any scan runs. A file therefore becomes *visible* immediately and becomes *downloadable* only when its scan status allows — which is the intended behaviour, and is why the two were separated. The scan task writes scan fields only.
@@ -228,11 +228,116 @@ Two invariants, both enforced server-side and both tested adversarially:
 
 Invitation acceptance is bound to the invited address: a signed-in user whose email differs from the invitation's is **rejected**, never silently accepted. An invitation is a grant to one address, not a bearer token for whoever opens the link.
 
+### 4.7 Reading the audit log
+
+Specified in v1.9 (M6). §4.6 enumerated who may *administer* a workspace but said nothing
+about who may *read* its history, and the permissive reading is a privacy leak rather than
+a convenience: `audit_logs` holds the IP address and user agent of every share-link
+visitor, plus the full activity pattern of every member.
+
+**Workspace owners only.** Editors and viewers are refused 403, not 404 — the endpoint's
+existence is not a secret, only its contents. This matches §4.6, where everything
+administrative belongs to the owner alone.
+
+Account-level events (`login`, `login_failed`, `logout`) carry `workspace_id = NULL` and
+therefore appear in **no** workspace log. They are a property of the account, not of a
+workspace; surfacing them to a workspace owner would tell them when a collaborator signed
+in to work that has nothing to do with them. A per-account session history is a separate
+surface, and not in v1.
+
+**The log is read as history, never as a live join.** Rendering `target_id` by looking the
+row up at read time would make an append-only table effectively mutable — renaming a file
+would silently rewrite what the log says was downloaded last week. Every write therefore
+denormalises a human-readable label into `metadata` at the moment of the event, and the
+reader displays that stored label. Rows written before this rule was stated (M1–M5) do not
+all carry one; the interface says the name was not recorded rather than inventing one or
+resolving it live.
+
+Pagination is **keyset on `(created_at, id)` descending**, not offset. The table is
+append-only and time-ordered, so a cursor is both cheaper and stable under concurrent
+writes, where an offset shifts every time a new row lands. The `(workspace_id, created_at)`
+index added in M1 serves exactly this query.
+
 ## 5. Notification Pipeline
 
-- Trigger events (file shared, permission granted, quota warning, scan flagged, workspace invitation) create a `notifications` row (`channel = email`, `status = pending`).
-- A Celery task picks up pending notifications and sends via Resend, updating `status` to `sent` or `failed`.
-- Schema is deliberately channel-agnostic (`notifications.channel` enum) so a `websocket` channel can be added in v1.1 by adding a new delivery task, without altering the trigger-side logic or the schema.
+Trigger events create a `notifications` row (`status = pending`); a Celery task delivers it
+through Resend and moves it to `sent` or `failed`. The schema stays channel-agnostic
+(`notifications.channel`) so a `websocket` channel can be added in v1.1 with a new delivery
+task, and no schema change or trigger-side edit.
+
+**Queueing joins the caller's transaction; sending does not.** The row is added to the
+transaction that caused the event, so an action that rolls back cannot leave behind a
+notification claiming it happened — the same rule `audit.record` follows. Delivery is
+dispatched only after that transaction commits.
+
+### 5a. What triggers what, and who receives it (specified in v1.9)
+
+| Event | Recipient | Reasoning |
+|---|---|---|
+| `workspace_invitation` | the invited address | The only channel by which an invitation can reach someone who has no account yet. M1 returned the raw token in the API response as an explicit stopgap; this replaces it. |
+| `file_shared` | the named recipient of a **private** link | Public, password-protected and expiring links have no recipient. Emailing the person who just pressed "create link" is noise, not a notification, so those three send nothing. |
+| `scan_flagged` | the uploader **and** every workspace owner | Deduplicated when the uploader is an owner. The uploader needs to know their file is withheld; the owners need to know because §3d makes them the only people who can release it. Notifying one without the other leaves either the decision-maker uninformed or the affected user mystified. |
+| `permission_granted` | the user who gained access | Sent when a file- or folder-level grant is created or **raised**, not when it is lowered or revoked. Being told you lost access is a different message, and v1 does not send it. |
+| `storage_quota_warning` | every workspace owner | Fires when usage crosses `storage_quota_warning_ratio` (0.9) **upward** — once per crossing, not on every upload after it. |
+
+**A quota warning is an edge, not a state.** The ratio sat in the configuration from M0 and
+was never read by anything. Wiring it naively to "usage ≥ 90%" would email the owners on
+every upload for the rest of the workspace's life. The trigger is the *transition*: a
+notification is queued only when usage before the reservation was below the ratio and usage
+after it is at or above. Deleting files back under the threshold re-arms it.
+
+### 5b. Delivery, and what `sent` actually means
+
+The Resend key in use is a **restricted, send-only** key: `GET /emails/{id}` returns 401,
+as do `/domains` and `/api-keys`. We cannot read back whether a message was delivered,
+opened or bounced.
+
+`status = sent` therefore means **"the provider accepted it"**, and nothing more. The
+provider's message id is stored in `provider_message_id` so that a delivery question can be
+answered by a human from the Resend dashboard — the column exists precisely because our own
+record cannot answer it. Overstating this would repeat the mistake §4.2 avoided when it
+named the share-link counter "uses" rather than "downloads": the interface must not promise
+an accounting the architecture cannot deliver.
+
+Failures are separated by kind, because they demand different things:
+
+- **Transient** (429, 5xx, connection failure) — retried with backoff. `attempts` and
+  `last_error` live on the row rather than only inside the Celery retry, so a worker
+  restart does not lose the count and the sweep can pick the row up again.
+- **Permanent** (422, and the 403s in §5c) — recorded `failed` with the provider's own
+  wording in `last_error`, and **never retried**. Retrying a refusal that is a property of
+  the configuration only burns free-tier budget.
+- **Not configured** — no API key at all. The row stays `pending` rather than being marked
+  failed, because nothing was wrong with the notification. This is the same distinction
+  `virustotal.py` draws between a transient error and a missing key.
+
+**Delivery is idempotent at the row.** A task that succeeds at the provider and then dies
+before committing would otherwise send again on retry. `sent_at` is the guard: a row that
+already carries one is never sent twice, and the claim is taken under a row lock.
+
+### 5c. The sandbox sender, and why mail is redirected in development
+
+Verified against the live API before designing on top of it, because none of this is
+inferable from the documentation for *this* account:
+
+- Sending from an unverified domain is refused **403**. `noreply@example.com` — what the
+  configuration actually shipped with — would have failed every single send. The sandbox
+  sender `onboarding@resend.dev` is accepted.
+- Without a verified domain the **only** permitted recipient is the account owner's own
+  address; anyone else is refused 403, with that address named in the error. A notification
+  to any other user is therefore a permanent failure until a domain is verified.
+- Resend's simulator addresses (`delivered@resend.dev`, `bounced@resend.dev`) are accepted
+  despite not being the owner, which is the only reason the delivery and failure paths are
+  testable at all.
+- Six sends with no pause drew no 429, though the documented ceiling is 2/second. The
+  limiter is built to the documented figure rather than the observed one.
+
+Because of that recipient restriction, `notification_redirect_to` exists: when set, every
+message goes to that address instead, and the rendered body carries a banner naming the
+recipient it was actually for. Without it, the only notification that could ever succeed is
+one already addressed to the account owner, and five of the six trigger paths would never be
+exercised end to end. It is **off unless explicitly set**, and the fact that a message was
+redirected is recorded on the row — a redirected send is never mistaken for a real one.
 
 ## 6. Storage Quota Enforcement
 
@@ -464,3 +569,56 @@ cannot execute — a second independent layer, and a sign that `files.mime_type`
 metadata, not what storage serves), a `PUT` against a download URL is refused 403, an
 expired signature returns 400 rather than 403, and the signed URL discloses the full
 storage key to the recipient.
+
+## 18. Amendment Log — v1.9 (11 Sep 2026, start of M6): audit reading and notifications
+
+§5 was rewritten rather than annotated. It had described the pipeline in three bullets,
+which was enough to build against until the provider was actually probed; four of the
+decisions below contradict what those bullets implied. §4.7 is new.
+
+1. **Who may read the audit log was never specified.** §4.6 answered who may administer a
+   workspace and stopped there, and the permissive default is not a minor convenience:
+   the table holds the IP address and user agent of every share-link visitor plus every
+   member's activity pattern. Now owners only, refused 403 rather than 404.
+2. **Account-level events belong to no workspace log.** `login`, `login_failed` and
+   `logout` carry `workspace_id = NULL`, so they are invisible in any workspace's history
+   by construction rather than by filtering. Surfacing them would tell an owner when a
+   collaborator signed in to unrelated work.
+3. **The log is read as history, not resolved live.** Displaying `target_id` by looking it
+   up now would make an append-only table mutable in effect — a rename would rewrite what
+   the log says happened last week. Labels are denormalised into `metadata` at write time.
+   Rows from M1–M5 predate the rule and do not all carry one; the reader says the name was
+   not recorded rather than inventing it.
+4. **`sent` means "the provider accepted it", not "it was delivered."** The restricted
+   send-only key cannot read a message's status back at all (`GET /emails/{id}` → 401).
+   The original three-bullet §5 implied the status field tracked delivery. It cannot, so
+   it is defined down to what is knowable, and `provider_message_id` is stored so a human
+   can answer the question from the dashboard.
+5. **Failures are separated into transient, permanent and not-configured**, with retry
+   state (`attempts`, `last_error`) on the row rather than only inside the Celery retry —
+   otherwise a worker restart loses the count and no sweep can recover the row. Retrying a
+   permanent refusal would only burn free-tier budget. This mirrors the distinction
+   `virustotal.py` already draws.
+6. **Delivery is idempotent at the row**, guarded by `sent_at` under a row lock. Without
+   it, a task that succeeded at the provider and died before committing would send again
+   on retry — and an unwanted duplicate email cannot be recalled.
+7. **A quota warning is an edge, not a state.** `storage_quota_warning_ratio` had sat in
+   the configuration since M0 without a single reader. The obvious wiring — notify while
+   usage ≥ 90% — would email the owners on every upload forever. It fires on the upward
+   crossing only, and deleting back under the threshold re-arms it.
+8. **Recipients are named per event** (§5a), because §5 listed trigger events without ever
+   saying who receives them, and for three of the five the answer is not obvious. In
+   particular `file_shared` fires only for a **private** link: the other three types have
+   no recipient, and emailing whoever just created the link is noise.
+9. **Mail is redirected in development** via `notification_redirect_to`, because the
+   sandbox permits exactly one recipient. Off unless set, and recorded on the row so a
+   redirected send is never counted as a real one.
+
+§5c records what was **verified against the live Resend API** rather than assumed, since
+these are the provider's properties and not ours: an unverified sending domain is refused
+403 — which the shipped `noreply@example.com` would have hit on every send — the sandbox
+permits only the account owner as recipient (403, naming that address), the simulator
+addresses `delivered@resend.dev` and `bounced@resend.dev` are exempt from that rule and so
+are the only way the delivery and failure paths can be exercised, and six sends with no
+pause drew no 429 despite a documented 2/second ceiling. The limiter follows the
+documented figure, not the observed absence of one.

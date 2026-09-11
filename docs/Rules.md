@@ -22,8 +22,12 @@ Prefix all env vars `FILESHARE_` to avoid collisions with other projects running
 - `FILESHARE_DATABASE_URL`
 - `FILESHARE_REDIS_URL`
 - `FILESHARE_JWT_SECRET`
+- `FILESHARE_RESEND_FROM_EMAIL`
+- `FILESHARE_NOTIFICATION_REDIRECT_TO`
 
 `.env` is never committed. `.env.example` (placeholder values only) is the tracked version.
+
+**A placeholder that the provider will reject is worse than an empty value** (added at M6). `FILESHARE_RESEND_FROM_EMAIL` shipped as `noreply@example.com`, which reads like a harmless default but is refused 403 by Resend on every single send — an unverified sending domain. `.env.example` therefore carries the sandbox sender that actually works, with the condition for changing it stated inline. The same applies to any credential-adjacent default: if the real service would reject it, it belongs in the file as a working value or not at all.
 
 **`NEXT_PUBLIC_*` variables are build-time, not runtime.** Next.js inlines them into the client bundle during `next build`. Any such value must reach the frontend image through `build.args`, never a runtime `environment:` entry — the latter is silently ignored by browser code and fails without an error. Changing one requires rebuilding the image, not restarting the container. (Corrected after M3; see `Architecture.md` §15.)
 
@@ -33,11 +37,13 @@ Prefix all env vars `FILESHARE_` to avoid collisions with other projects running
 - **Bearer tokens the system issues are stored hashed, never raw** (added at M5, after Schema §9 had specified a raw column for share links). Refresh tokens, invitation tokens and share-link tokens are 48 bytes of CSPRNG output persisted as SHA-256 — SHA-256 rather than Argon2 because there is no human-chosen secret to brute force and lookup must stay indexable. The raw value is returned once and never again. Any new token type follows the same rule, and the user-visible consequence (a token cannot be re-displayed) is surfaced at the point of creation rather than discovered later.
 - The **Supabase service role key bypasses Row Level Security entirely**. It is server-side only and must never reach the browser, a client bundle, or a `NEXT_PUBLIC_` variable.
 - Object storage access uses **signed URLs** for all client-facing file access (upload and download) — the backend never proxies raw file bytes through itself for large files, and the client never receives a raw/unsigned storage URL or provider credentials.
+- **Email is an outbound copy of our data, so it carries only what the recipient is already entitled to** (added at M6). A notification names the workspace, the file and the actor; it never embeds a share-link token, an invitation token, a signed storage URL, or file contents. An invitation email carries its token because the token *is* the invitation and there is no other channel, and that is the single exception. Notification bodies are never written to the application log for the same reason file contents are not.
+- **A restricted, send-only provider key is preferred over a full-access one** (added at M6). The Resend key in use cannot list domains, read API keys, or read a message's delivery status. That costs us delivery visibility — which is why `notifications.status = sent` is defined as "the provider accepted it" rather than overstated — and it is the right trade: a leaked sending key can send mail, while a leaked full key exposes the account.
 - VirusTotal API calls are rate-limited client-side (reusing the previously-designed `api_keys`/`rate_limit_rules`-style pattern) to stay within the free-tier request budget — do not just retry-on-429 without a proactive limiter.
 
 ## 4. File/Folder Convention (project structure)
 
-Mirrors the structure used in prior shipped projects.
+Mirrors the structure used in prior shipped projects. *(Corrected at M6: the tree below had drifted, naming a single `scanning.py` and a `version_tasks.py` that were never built that way. A provider client is kept separate from the domain logic that uses it — `virustotal.py` beside `scan.py`, `resend.py` beside `notifications.py` — because the client is the part that gets probed, stubbed and replaced.)*
 
 Repo root on the dev machine is `d:\Secure File Sharing Platform` (the five design docs move into `docs/` at M0).
 
@@ -57,12 +63,17 @@ secure-file-sharing/
       routers/
       services/
         storage.py        # signed URL generation, multipart sessions (provider-agnostic surface)
-        scanning.py       # VirusTotal integration + rate limiter
-        notifications.py  # Resend email sending
+        virustotal.py     # the VirusTotal HTTP client, nothing else
+        vt_budget.py      # outbound request budget (fail-closed, Architecture §3a)
+        scan.py           # scan domain logic: verdicts, overrides, downloadability
+        resend.py         # the Resend HTTP client, nothing else
+        notifications.py  # queueing and rendering; delivery rules in Architecture §5
+        audit.py          # append-only audit writes (Architecture §4.5, §4.7)
         permissions.py    # the single permission-resolution path (Architecture §4)
       tasks/             # Celery tasks
         scan_tasks.py
-        version_tasks.py
+        content_tasks.py
+        notification_tasks.py
         maintenance_tasks.py   # quota reconciliation, orphan multipart sweep
     alembic/             # migrations
     tests/
