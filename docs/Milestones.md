@@ -999,9 +999,59 @@ surfaces exist, so M7 builds them first.
 
 | Stage | Scope | Status |
 |---|---|---|
-| M7a | App shell with a shared workspace selection; row menu with download, versions + rollback, rename, move, delete; trash; per-item permissions (list, grant, revoke — files and folders); members, roles and invitations; releasing a flagged file; workspace settings; sign out everywhere; the permission indicator; member-only grants | Not started |
+| M7a | App shell with a shared workspace selection; row menu with download, versions + rollback, rename, move, delete; trash; per-item permissions (list, grant, revoke — files and folders); members, roles and invitations; releasing a flagged file; workspace settings; sign out everywhere; the permission indicator; member-only grants | **Done** (12 Sep 2026) |
 | M7b | Search over name and tags with the five metadata filters; trigram index; tag editor with per-tag limits | Not started |
 | M7c | Design pass across every page: scan badge colours corrected to Design §3/§5, file-type icons, table/grid toggle, folder drag-and-drop, the readiness page M0 never eyeballed, anti-slop audit | Not started |
+
+### M7a — what it delivered, and what it found
+
+Every feature v1 already had an API for now has an interface, and the signed-in pages
+share one shell: the session and the chosen workspace belong to the shell, so opening
+Activity shows the workspace the user was just looking at. Pages are keyed by workspace,
+so switching starts fresh rather than carrying a folder or filter across. Row actions are
+built from the viewer's role on *that item* — a grant can narrow or widen it (§4.1) — and
+anything their role would refuse is absent rather than shown.
+
+Found while building the surfaces that expose them, both recorded in the docs first:
+
+- **Deleting a workspace orphaned every object it held** (Architecture §6c). The one hard
+  delete in the system: once the rows were gone, nothing could find the objects, because
+  the retention sweep works from `file_versions`. A background prefix purge now runs.
+  Probed before designing: Supabase supports paginated listing under a prefix and
+  **refuses** S3's batch delete, so cleanup is one request per object.
+- **An owner could raise their own workspace's quota** without bound, past the 1 GB
+  bucket every workspace shares (§4.6). Now lower-only, up to the platform ceiling.
+- **Nobody could leave a workspace**, though §4.6's invariant already spoke of an owner
+  not being "allowed to leave" (§4.6).
+- **M6's claim that every audit write carried a label was wrong.** The download wrote no
+  metadata at all, so M6's search for metadata blocks never saw it, and two grant writes
+  did not match its pattern. A structural test now walks the syntax tree and fails on any
+  workspace-scoped `audit.record` without one.
+
+### Verification (M7a)
+
+| Check | Result |
+|---|---|
+| Backend suite | 328 passing (from 287 at the end of M6), 0 skipped, ruff clean |
+| Frontend | eslint clean, `tsc --noEmit` clean, production build clean across 12 routes |
+| Migration | 0007 upgrade, downgrade, re-upgrade clean; parity test agrees with the models |
+| Browser | 38 checks in real Chrome against the live stack, run twice with no failures |
+
+The browser run drove the whole surface as a person would: downloading a file the UI
+could not download before, versions and a rollback, rename, a new folder and a move,
+delete with undo, a restore from the trash, an invitation accepted through the link the
+Members page shows once, a narrowed grant seen from the other person's own browser, an
+owner refused a quota raise, and the last owner refused leaving.
+
+**A negative control for the security fix**: with the pre-M7 resolver restored inside the
+container, a grant row for a non-member resolved to `owner`. The latent defect was real,
+not theoretical.
+
+Three failures in the first browser runs were the test's fault, not the product's, and
+the third is worth keeping: a file is **not** downloadable immediately after a rollback.
+A restored version is a new version and waits for its scan, even though the verdict comes
+from the cache at no cost. The interface is right to withhold it; the test had to wait,
+the way a person would.
 
 ### Docs amended first
 
