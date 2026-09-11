@@ -245,6 +245,14 @@ async def resolve_object_role(
     """
     membership = await get_membership(db, workspace_id, user.id)
 
+    # 0. Membership is a precondition (Architecture §4.1, v1.10). A grant refines a
+    #    member's role; it never admits a non-member. Until M7 the grant route accepted
+    #    any user and this function honoured the grant before looking at membership —
+    #    inert only because every workspace endpoint refused non-members first. Search's
+    #    argument that membership is sufficient scoping (§4.8) must not rest on that.
+    if membership is None:
+        return None
+
     # 1. Explicit grant on the file itself.
     if file_id is not None:
         result = await db.execute(
@@ -279,11 +287,7 @@ async def resolve_object_role(
                         return grants[candidate]
 
     # 3. Workspace-level default.
-    if membership is not None:
-        return membership.role
-
-    # 4. Not a member and no explicit grant.
-    return None
+    return membership.role
 
 
 async def require_object_role(
@@ -320,3 +324,68 @@ async def assert_move_is_acyclic(
         raise DepthLimitExceeded(
             f"Folders may not nest deeper than {MAX_FOLDER_DEPTH} levels."
         )
+
+
+async def listing_roles(
+    db: AsyncSession,
+    *,
+    workspace_id: uuid.UUID,
+    user: User,
+    folder_id: uuid.UUID | None,
+    file_ids: list[uuid.UUID],
+    child_folder_ids: list[uuid.UUID],
+) -> tuple[dict[uuid.UUID, WorkspaceRole], dict[uuid.UUID, WorkspaceRole]]:
+    """Every listed item's effective role, in a constant number of queries.
+
+    The same §4.1 rules as `resolve_object_role`, restructured for a listing: every item
+    in one folder shares that folder's ancestor chain, so the nearest inherited grant is
+    resolved once, and only the items' own direct grants are looked up per listing
+    rather than per item. Calling the single-item resolver in a loop would cost a
+    recursive CTE per row on the hottest page in the product (Design.md §5 indicator).
+    """
+    membership = await get_membership(db, workspace_id, user.id)
+    if membership is None:
+        return {}, {}
+
+    inherited = membership.role
+    if folder_id is not None:
+        chain = await ancestor_chain(db, folder_id)
+        if chain:
+            result = await db.execute(
+                select(FilePermission.folder_id, FilePermission.role)
+                .join(Folder, Folder.id == FilePermission.folder_id)
+                .where(
+                    FilePermission.folder_id.in_(chain),
+                    FilePermission.user_id == user.id,
+                    Folder.deleted_at.is_(None),
+                )
+            )
+            grants = {row.folder_id: row.role for row in result.all()}
+            for candidate in chain:  # nearest first
+                if candidate in grants:
+                    inherited = grants[candidate]
+                    break
+
+    direct_files: dict[uuid.UUID, WorkspaceRole] = {}
+    if file_ids:
+        result = await db.execute(
+            select(FilePermission.file_id, FilePermission.role).where(
+                FilePermission.file_id.in_(file_ids), FilePermission.user_id == user.id
+            )
+        )
+        direct_files = {row.file_id: row.role for row in result.all()}
+
+    direct_folders: dict[uuid.UUID, WorkspaceRole] = {}
+    if child_folder_ids:
+        result = await db.execute(
+            select(FilePermission.folder_id, FilePermission.role).where(
+                FilePermission.folder_id.in_(child_folder_ids),
+                FilePermission.user_id == user.id,
+            )
+        )
+        direct_folders = {row.folder_id: row.role for row in result.all()}
+
+    return (
+        {fid: direct_files.get(fid, inherited) for fid in file_ids},
+        {fid: direct_folders.get(fid, inherited) for fid in child_folder_ids},
+    )

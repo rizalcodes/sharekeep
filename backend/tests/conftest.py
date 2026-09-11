@@ -279,16 +279,53 @@ def stub_storage(monkeypatch):
             {"part_number": n, "etag": f'"etag-{n}"'} for n in landed_parts.get(key, [])
         ],
     )
-    monkeypatch.setattr(storage_module, "delete_object", lambda key: None)
+    deleted: list[str] = []
+    monkeypatch.setattr(storage_module, "delete_object", lambda key: deleted.append(key))
     monkeypatch.setattr(
         storage_module,
         "generate_download_url",
         generate_download_url,
     )
+
+    # M7: rollback copies server-side, and the retention sweep purges. Both mirror the
+    # real signatures and record every call, so a test asserts what storage was asked
+    # to do. `purge_failures` lets a test make storage refuse specific keys, which is the
+    # case the sweep's correctness actually depends on.
+    copies: list[tuple[str, str]] = []
+    purged: list[str] = []
+    purge_failures: set[str] = set()
+
+    def copy_object(source_key, destination_key):
+        copies.append((source_key, destination_key))
+
+    def purge_object(storage_key):
+        if storage_key in purge_failures:
+            raise storage_module.StorageError("simulated storage refusal")
+        purged.append(storage_key)
+
+    monkeypatch.setattr(storage_module, "copy_object", copy_object)
+    monkeypatch.setattr(storage_module, "purge_object", purge_object)
+
+    # The backstop. Every function above replaces one that would otherwise reach the
+    # live Supabase bucket; a new storage function added without a stub here would do
+    # exactly that, silently, from every test run. Making the client itself fail turns
+    # that into a loud error naming the cause.
+    def _no_real_storage():
+        raise AssertionError(
+            "A test reached the real storage client. Stub the storage function it "
+            "called in tests/conftest.py::stub_storage."
+        )
+
+    monkeypatch.setattr(storage_module, "get_storage_client", _no_real_storage)
+
     return {
         "uploads": uploads,
         "landed_parts": landed_parts,
         "download_urls": issued_urls,
+        "copies": copies,
+        "purged": purged,
+        "purge_failures": purge_failures,
+        "deleted": deleted,
     }
 
 

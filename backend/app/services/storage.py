@@ -285,6 +285,46 @@ def delete_object(storage_key: str) -> None:
         logger.warning("failed to delete %s: %s", storage_key, type(exc).__name__)
 
 
+def copy_object(source_key: str, destination_key: str) -> None:
+    """Server-side copy within the bucket, for version rollback (Architecture.md §4.9).
+
+    Verified against the live bucket before rollback was designed on it: Supabase's S3
+    endpoint accepts CopyObject, the copy is byte-identical (SHA-256 compared) and keeps
+    its content type. A single CopyObject request covers objects up to 5 GB — far above
+    the 50 MB provider ceiling — so the multipart UploadPartCopy path, which was also
+    probed and works, is not needed while the project is on Supabase.
+
+    Raises rather than logging: a rollback that silently failed to copy would make a
+    version row point at an object that does not exist.
+    """
+    bucket = settings.supabase_storage_bucket
+    try:
+        get_storage_client().copy_object(
+            Bucket=bucket,
+            Key=destination_key,
+            CopySource={"Bucket": bucket, "Key": source_key},
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise StorageError(f"Could not copy the stored version: {type(exc).__name__}") from exc
+
+
+def purge_object(storage_key: str) -> None:
+    """Delete an object and RAISE if storage refuses (Architecture.md §6b).
+
+    `delete_object` above logs and carries on, which is right for best-effort cleanup.
+    The retention sweep needs the opposite: it stamps `purged_at` after this returns,
+    and a swallowed failure would record bytes as gone while they stay in the bucket —
+    uncounted by quota and never retried. Deleting a key that no longer exists succeeds
+    on S3, which is what makes a re-run of the sweep harmless.
+    """
+    try:
+        get_storage_client().delete_object(
+            Bucket=settings.supabase_storage_bucket, Key=storage_key
+        )
+    except (BotoCoreError, ClientError) as exc:
+        raise StorageError(f"Could not purge {type(exc).__name__}") from exc
+
+
 # --- Reading objects back (Architecture.md §3, added in M4) -----------------------
 #
 # Upload never routes bytes through the backend, but scanning has to: the checksum is

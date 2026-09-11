@@ -135,7 +135,11 @@ class AuditAction(enum.StrEnum):
     SHARE_ACCESS_DENIED = "share_access_denied"
     DELETE = "delete"
     PERMISSION_CHANGED = "permission_changed"
+    # Despite the name, this has always meant RESTORED FROM THE TRASH — it is what
+    # M2's restore writes. Rolling back to an earlier version is VERSION_ROLLED_BACK.
+    # The name stays because the log is append-only (Schema.md §10).
     VERSION_RESTORED = "version_restored"
+    VERSION_ROLLED_BACK = "version_rolled_back"
     FOLDER_CREATED = "folder_created"
     FOLDER_DELETED = "folder_deleted"
     LOGIN = "login"

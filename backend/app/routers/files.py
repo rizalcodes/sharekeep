@@ -34,7 +34,7 @@ from app.schemas.content import (
     UploadPart,
     VersionOut,
 )
-from app.services import audit, notifications, permissions, quota, scan, storage
+from app.services import audit, notifications, permissions, quota, scan, storage, trash
 from app.services import files as file_service
 from app.tasks import content_tasks, notification_tasks
 
@@ -289,13 +289,20 @@ async def download_file(
     access: ViewerAccess,
     user: CurrentUser,
     db: DbSession,
+    version_id: uuid.UUID | None = None,
 ) -> DownloadResponse:
-    """Returns a short-lived signed URL — the API never proxies the bytes."""
+    """Returns a short-lived signed URL — the API never proxies the bytes.
+
+    `version_id` names an earlier retained version (added at M7), so a version can be
+    looked at before it is restored. Each version is judged by its own scan result.
+    """
     workspace, _ = access
     file = await _load(db, workspace.id, file_id)
     await _require(db, workspace, user, file, WorkspaceRole.VIEWER)
     try:
-        url = await file_service.download_url(db, file)
+        url, served = await file_service.download_url(db, file, version_id)
+    except file_service.VersionNotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
     except file_service.FileError as exc:
         # A file blocked by scan status is a 403, not a 404: it exists, and the caller
         # is allowed to know that it is being withheld.
@@ -311,12 +318,20 @@ async def download_file(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
+        # Written with no metadata at all until M7, so M6's label pass — which searched
+        # for metadata blocks — never saw it. tests/test_audit_labels.py now checks
+        # every audit write structurally, so a call without a label cannot recur.
+        metadata={
+            "label": file.name,
+            "version": served.version_number,
+            "file_version_id": str(served.id),
+        },
     )
     await db.commit()
     return DownloadResponse(
         url=url,
         expires_in_seconds=settings.signed_download_url_ttl_seconds,
-        scan_status=file.scan_status,
+        scan_status=served.scan_status,
     )
 
 
@@ -336,6 +351,19 @@ async def list_versions(
         )
         .order_by(FileVersion.version_number.desc())
     )
+    versions = list(result.scalars().all())
+    uploaders = await _users_by_id(db, {v.uploaded_by for v in versions})
+    # A rollback's source may since have been pruned, so its number is looked up across
+    # every version of the file, deleted or not.
+    numbers = dict(
+        (
+            await db.execute(
+                select(FileVersion.id, FileVersion.version_number).where(
+                    FileVersion.file_id == file.id
+                )
+            )
+        ).all()
+    )
     return [
         VersionOut(
             **{
@@ -344,10 +372,89 @@ async def list_versions(
                 # Resolved server-side so a client cannot re-derive the §3 access table
                 # and arrive somewhere different from the code that enforces it.
                 "is_downloadable": scan.version_is_downloadable(v),
+                "uploaded_by_email": getattr(uploaders.get(v.uploaded_by), "email", None),
+                "uploaded_by_name": getattr(uploaders.get(v.uploaded_by), "full_name", None),
+                "restored_from_version_number": numbers.get(v.restored_from_version_id),
             }
         )
-        for v in result.scalars().all()
+        for v in versions
     ]
+
+
+async def _users_by_id(db, ids: set[uuid.UUID]) -> dict[uuid.UUID, User]:
+    if not ids:
+        return {}
+    rows = await db.execute(select(User).where(User.id.in_(ids)))
+    return {u.id: u for u in rows.scalars().all()}
+
+
+@router.post(
+    "/files/{file_id}/versions/{version_id}/restore",
+    response_model=VersionOut,
+    status_code=201,
+)
+async def rollback_version(
+    file_id: uuid.UUID,
+    version_id: uuid.UUID,
+    request: Request,
+    access: ViewerAccess,
+    user: CurrentUser,
+    db: DbSession,
+) -> VersionOut:
+    """Make an earlier version current again by copying it forward (Architecture §4.9).
+
+    Requires editor, like an upload, because that is what it amounts to: a new
+    retained version that counts toward quota and the 10-version cap.
+    """
+    workspace, _ = access
+    file = await _load(db, workspace.id, file_id)
+    await _require(db, workspace, user, file, WorkspaceRole.EDITOR)
+    try:
+        source = await file_service.live_version(db, file, version_id)
+        version, pruned = await file_service.rollback(
+            db, workspace=workspace, file=file, source=source, user=user
+        )
+    except file_service.VersionNotFound as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from exc
+    except file_service.RollbackRefused as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    except Exception as exc:
+        raise _translate(exc) from exc
+
+    await audit.record(
+        db,
+        action=AuditAction.VERSION_ROLLED_BACK,
+        target_type=AuditTargetType.FILE,
+        target_id=file.id,
+        workspace_id=workspace.id,
+        actor_id=user.id,
+        request=request,
+        metadata={
+            "label": file.name,
+            "restored_version": source.version_number,
+            "new_version": version.version_number,
+            "file_version_id": str(version.id),
+        },
+    )
+    await db.commit()
+    await db.refresh(version)
+
+    for old in pruned:
+        storage.delete_object(old.storage_key)
+    # The checksum is already known (a byte-identical copy), so this skips re-reading the
+    # object and hands straight to the scanner, which answers from the verdict cache.
+    content_tasks.compute_checksum.delay(str(version.id))
+
+    return VersionOut(
+        **{
+            **VersionOut.model_validate(version).model_dump(),
+            "is_current": True,
+            "is_downloadable": scan.version_is_downloadable(version),
+            "uploaded_by_email": user.email,
+            "uploaded_by_name": user.full_name,
+            "restored_from_version_number": source.version_number,
+        }
+    )
 
 
 @router.post(
@@ -504,6 +611,11 @@ async def restore_file(
     workspace, role = access
     if not role.can_act_as(WorkspaceRole.EDITOR):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Requires editor.")
+    # Gone for good once the retention sweep purged the bytes (Architecture §6b).
+    try:
+        await trash.assert_restorable(db, payload.deletion_batch_id)
+    except trash.GoneForGood as exc:
+        raise HTTPException(status.HTTP_410_GONE, str(exc)) from exc
     try:
         restored = await file_service.restore(
             db, workspace=workspace, batch_id=payload.deletion_batch_id
@@ -551,6 +663,14 @@ async def grant_on_file(
     target = await db.get(User, payload.user_id)
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found.")
+    # A grant refines a MEMBER's role; it never admits a non-member (Architecture §4.1,
+    # Schema §8). Before M7 this route accepted any user.
+    if await permissions.get_membership(db, workspace.id, payload.user_id) is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Only members of this workspace can be given access to an item. "
+            "Invite them to the workspace first.",
+        )
 
     existing = await db.execute(
         select(FilePermission).where(
@@ -596,7 +716,12 @@ async def grant_on_file(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"user_id": str(payload.user_id), "role": payload.role.value},
+        metadata={
+            "label": file.name,
+            "user_id": str(payload.user_id),
+            "email": target.email,
+            "role": payload.role.value,
+        },
     )
     await db.commit()
     await db.refresh(grant)
@@ -648,6 +773,103 @@ async def revoke_file_grant(
     await db.commit()
 
 
+@router.get("/files/{file_id}/grants", response_model=list[GrantOut])
+async def list_file_grants(
+    file_id: uuid.UUID, access: ViewerAccess, user: CurrentUser, db: DbSession
+) -> list[GrantOut]:
+    """Explicit grants on one file. Owner-only, like granting: who has been given what
+    is administrative information (added at M7 — grants could be made, never read)."""
+    workspace, _ = access
+    file = await _load(db, workspace.id, file_id)
+    await _require(db, workspace, user, file, WorkspaceRole.OWNER)
+    return await _grants_out(db, FilePermission.file_id == file.id)
+
+
+async def _load_folder_as_owner(db, workspace, user, folder_id: uuid.UUID):
+    from app.services import folders as folder_service
+
+    folder = await folder_service.get_folder(db, workspace.id, folder_id)
+    if folder is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Folder not found.")
+    try:
+        await permissions.require_object_role(
+            db,
+            workspace_id=workspace.id,
+            user=user,
+            required=WorkspaceRole.OWNER,
+            folder_id=folder.id,
+        )
+    except permissions.PermissionError_ as exc:
+        raise _translate(exc) from exc
+    return folder
+
+
+@router.get("/folders/{folder_id}/grants", response_model=list[GrantOut])
+async def list_folder_grants(
+    folder_id: uuid.UUID, access: ViewerAccess, user: CurrentUser, db: DbSession
+) -> list[GrantOut]:
+    workspace, _ = access
+    folder = await _load_folder_as_owner(db, workspace, user, folder_id)
+    return await _grants_out(db, FilePermission.folder_id == folder.id)
+
+
+async def _grants_out(db, condition) -> list[GrantOut]:
+    rows = await db.execute(
+        select(FilePermission, User.email)
+        .join(User, User.id == FilePermission.user_id)
+        .where(condition)
+        .order_by(User.email)
+    )
+    return [
+        GrantOut(**{**GrantOut.model_validate(grant).model_dump(), "email": email})
+        for grant, email in rows.all()
+    ]
+
+
+@router.delete("/folders/{folder_id}/grants/{user_id}", status_code=204)
+async def revoke_folder_grant(
+    folder_id: uuid.UUID,
+    user_id: uuid.UUID,
+    request: Request,
+    access: ViewerAccess,
+    user: CurrentUser,
+    db: DbSession,
+) -> None:
+    """Revoke a folder grant — impossible before M7.
+
+    Until then a folder grant, once made, was permanent. Narrowing a grant is how access
+    is taken away, so an irrevocable one was a security defect rather than a missing
+    convenience (Architecture §19).
+    """
+    workspace, _ = access
+    folder = await _load_folder_as_owner(db, workspace, user, folder_id)
+    result = await db.execute(
+        select(FilePermission).where(
+            FilePermission.folder_id == folder.id, FilePermission.user_id == user_id
+        )
+    )
+    grant = result.scalar_one_or_none()
+    if grant is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Grant not found.")
+    await db.delete(grant)
+    await audit.record(
+        db,
+        action=AuditAction.PERMISSION_CHANGED,
+        target_type=AuditTargetType.FOLDER,
+        target_id=folder.id,
+        workspace_id=workspace.id,
+        actor_id=user.id,
+        request=request,
+        metadata={
+            "label": folder.name,
+            "user_id": str(user_id),
+            "role": None,
+            "revoked": True,
+        },
+    )
+    await db.commit()
+
+
 @router.post("/folders/{folder_id}/grants", response_model=GrantOut, status_code=201)
 async def grant_on_folder(
     folder_id: uuid.UUID,
@@ -679,6 +901,14 @@ async def grant_on_folder(
     target = await db.get(User, payload.user_id)
     if target is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found.")
+    # A grant refines a MEMBER's role; it never admits a non-member (Architecture §4.1,
+    # Schema §8). Before M7 this route accepted any user.
+    if await permissions.get_membership(db, workspace.id, payload.user_id) is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Only members of this workspace can be given access to an item. "
+            "Invite them to the workspace first.",
+        )
 
     existing = await db.execute(
         select(FilePermission).where(
@@ -723,7 +953,12 @@ async def grant_on_folder(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"user_id": str(payload.user_id), "role": payload.role.value},
+        metadata={
+            "label": folder.name,
+            "user_id": str(payload.user_id),
+            "email": target.email,
+            "role": payload.role.value,
+        },
     )
     await db.commit()
     await db.refresh(grant)

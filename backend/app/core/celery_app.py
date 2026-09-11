@@ -64,6 +64,12 @@ celery_app.conf.beat_schedule = {
         "task": "app.tasks.notification_tasks.sweep_pending_notifications",
         "schedule": crontab(minute="*/10"),
     },
+    # Architecture.md §6b: delete the bytes of anything deleted more than the retention
+    # period ago. Described since M2 and never scheduled until M7.
+    "purge-expired-deletions": {
+        "task": "app.tasks.maintenance_tasks.purge_expired_deletions",
+        "schedule": crontab(hour="4", minute="10"),
+    },
     # Supabase free-tier projects pause after 7 days of inactivity (PRD §10).
     # Daily is ample headroom; removed when the project returns to AWS S3.
     "storage-keepalive": {

@@ -7,13 +7,14 @@ membership or grants for itself.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from app.core.config import settings
 from app.core.dependencies import CurrentUser, DbSession, ViewerAccess
-from app.models.content import File, Folder
+from app.models.content import File, FilePermission, Folder, ShareLink
 from app.models.enums import AuditAction, AuditTargetType, WorkspaceRole
 from app.schemas.content import (
     BreadcrumbEntry,
@@ -25,7 +26,7 @@ from app.schemas.content import (
     FolderUpdate,
     RestoreRequest,
 )
-from app.services import audit, permissions, scan
+from app.services import audit, permissions, scan, trash
 from app.services import folders as folder_service
 
 router = APIRouter(
@@ -109,15 +110,26 @@ async def _listing(db, workspace_id: uuid.UUID, folder: Folder | None, user) -> 
     )
     trail = await folder_service.breadcrumb(db, folder_id) if folder_id else []
     files = list(child_files.scalars().all())
+    folders = list(child_folders.scalars().all())
     # One query for every file's current version, not one per file: the override and
     # skip reason live on the version, and this is the main browsing path.
     facts = await scan.presentation_for(db, files)
+    marks = await _indicator_facts(db, workspace_id, folder_id, user, files, folders)
     return FolderListing(
         folder=FolderOut.model_validate(folder) if folder else None,
         breadcrumb=[BreadcrumbEntry(id=f.id, name=f.name) for f in trail],
-        folders=[FolderOut.model_validate(f) for f in child_folders.scalars().all()],
+        folders=[
+            FolderOut(**{**FolderOut.model_validate(f).model_dump(), **marks["folders"][f.id]})
+            for f in folders
+        ],
         files=[
-            FileOut(**{**FileOut.model_validate(f).model_dump(), **facts[f.id]})
+            FileOut(
+                **{
+                    **FileOut.model_validate(f).model_dump(),
+                    **facts[f.id],
+                    **marks["files"][f.id],
+                }
+            )
             for f in files
         ],
     )
@@ -284,6 +296,11 @@ async def restore_folder(
     workspace, role = access
     if not role.can_act_as(WorkspaceRole.EDITOR):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Requires editor.")
+    # Gone for good once the retention sweep purged the bytes (Architecture §6b).
+    try:
+        await trash.assert_restorable(db, payload.deletion_batch_id)
+    except trash.GoneForGood as exc:
+        raise HTTPException(status.HTTP_410_GONE, str(exc)) from exc
     try:
         restored, reclaimed = await folder_service.restore_batch(
             db, workspace, payload.deletion_batch_id
@@ -309,3 +326,80 @@ async def restore_folder(
     )
     await db.commit()
     return {"restored": restored, "bytes_reclaimed": reclaimed}
+
+
+async def _indicator_facts(db, workspace_id, folder_id, user, files, folders) -> dict:
+    """The permission indicator's data (Design.md §5): the viewer's role on each item and
+    whether it is shared. A fixed number of grouped queries per listing, not per row."""
+    file_ids = [f.id for f in files]
+    folder_ids = [f.id for f in folders]
+    file_roles, folder_roles = await permissions.listing_roles(
+        db,
+        workspace_id=workspace_id,
+        user=user,
+        folder_id=folder_id,
+        file_ids=file_ids,
+        child_folder_ids=folder_ids,
+    )
+
+    grants_per_file: dict = {}
+    grants_per_folder: dict = {}
+    links_per_file: dict = {}
+    if file_ids:
+        grants_per_file = dict(
+            (
+                await db.execute(
+                    select(FilePermission.file_id, func.count())
+                    .where(FilePermission.file_id.in_(file_ids))
+                    .group_by(FilePermission.file_id)
+                )
+            ).all()
+        )
+        now = datetime.now(UTC)
+        # "Active" means a visitor could redeem it right now — the same three conditions
+        # resolution checks, so the mark cannot claim a link works when it would refuse.
+        links_per_file = dict(
+            (
+                await db.execute(
+                    select(ShareLink.file_id, func.count())
+                    .where(
+                        ShareLink.file_id.in_(file_ids),
+                        ShareLink.revoked_at.is_(None),
+                        or_(ShareLink.expires_at.is_(None), ShareLink.expires_at > now),
+                        or_(
+                            ShareLink.max_downloads.is_(None),
+                            ShareLink.download_count < ShareLink.max_downloads,
+                        ),
+                    )
+                    .group_by(ShareLink.file_id)
+                )
+            ).all()
+        )
+    if folder_ids:
+        grants_per_folder = dict(
+            (
+                await db.execute(
+                    select(FilePermission.folder_id, func.count())
+                    .where(FilePermission.folder_id.in_(folder_ids))
+                    .group_by(FilePermission.folder_id)
+                )
+            ).all()
+        )
+
+    return {
+        "files": {
+            fid: {
+                "my_role": file_roles.get(fid),
+                "explicit_grants": grants_per_file.get(fid, 0),
+                "active_share_links": links_per_file.get(fid, 0),
+            }
+            for fid in file_ids
+        },
+        "folders": {
+            fid: {
+                "my_role": folder_roles.get(fid),
+                "explicit_grants": grants_per_folder.get(fid, 0),
+            }
+            for fid in folder_ids
+        },
+    }

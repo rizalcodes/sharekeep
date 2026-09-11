@@ -112,3 +112,60 @@ def storage_keepalive() -> dict[str, Any]:
     if not result["ok"]:
         logger.warning("storage_keepalive: storage unreachable (%s)", result.get("detail"))
     return result
+
+
+# How many objects one sweep run deletes. Bounded so a first run over a long backlog
+# cannot hold one transaction open for thousands of storage calls.
+PURGE_BATCH = 500
+
+
+async def _purge_expired() -> dict[str, Any]:
+    """Delete the objects of versions deleted more than the retention period ago.
+
+    Architecture.md §6a described this sweep from M2 and nothing implemented it:
+    `soft_delete_retention_days` had no reader. Deleting released quota at once while the
+    bytes stayed in the bucket forever, so real usage drifted above what quota counts —
+    on a free plan with a 1 GB ceiling.
+
+    `purged_at` is stamped only after storage confirms the delete (`purge_object`
+    raises, unlike `delete_object`). A failure leaves the row for the next run instead
+    of recording bytes as gone that are still there. Rows are kept for audit.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=settings.soft_delete_retention_days)
+    purged = 0
+    failed = 0
+    reclaimed = 0
+
+    async with SessionLocal() as db:
+        result = await db.execute(
+            select(FileVersion)
+            .where(
+                FileVersion.deleted_at.is_not(None),
+                FileVersion.deleted_at < cutoff,
+                FileVersion.purged_at.is_(None),
+            )
+            .order_by(FileVersion.deleted_at)
+            .limit(PURGE_BATCH)
+        )
+        for version in result.scalars().all():
+            try:
+                storage.purge_object(version.storage_key)
+            except storage.StorageError as exc:
+                failed += 1
+                logger.warning("purge failed for a version, will retry next run: %s", exc)
+                continue
+            version.purged_at = datetime.now(UTC)
+            purged += 1
+            reclaimed += version.size_bytes
+        await db.commit()
+
+    if purged or failed:
+        logger.info(
+            "retention sweep purged %s object(s), %s bytes; %s failed", purged, reclaimed, failed
+        )
+    return {"purged": purged, "failed": failed, "bytes_purged": reclaimed}
+
+
+@celery_app.task(name="app.tasks.maintenance_tasks.purge_expired_deletions")
+def purge_expired_deletions() -> dict[str, Any]:
+    return _run(_purge_expired())

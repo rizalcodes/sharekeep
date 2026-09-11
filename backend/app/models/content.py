@@ -188,6 +188,18 @@ class FileVersion(UUIDPrimaryKeyMixin, CreatedAtMixin, SoftDeleteBatchMixin, Bas
     upload_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Set on a version created by rolling back to an earlier one (Architecture §4.9), so
+    # the history says "restored from version 3" rather than showing an identical upload.
+    restored_from_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("file_versions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Set when the retention sweep deleted this version's object (Architecture §6b).
+    # The row stays for audit; the bytes are gone, and restore must say so.
+    purged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     file: Mapped[File] = relationship(back_populates="versions", foreign_keys=[file_id])
 
@@ -210,6 +222,12 @@ class FileVersion(UUIDPrimaryKeyMixin, CreatedAtMixin, SoftDeleteBatchMixin, Bas
         # The scan worker looks up verdicts by content hash (Architecture.md §3c) and
         # the stuck-scan sweep looks up unresolved versions by status.
         Index("ix_file_versions_checksum_sha256", "checksum_sha256"),
+        # The retention sweep's only query: deleted, not yet purged, oldest first.
+        Index(
+            "ix_file_versions_awaiting_purge",
+            "deleted_at",
+            postgresql_where=text("deleted_at IS NOT NULL AND purged_at IS NULL"),
+        ),
     )
 
     @property

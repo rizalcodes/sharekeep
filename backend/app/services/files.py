@@ -333,21 +333,133 @@ async def current_version(db: AsyncSession, file: File) -> FileVersion | None:
     return version
 
 
-async def download_url(db: AsyncSession, file: File) -> str:
-    """A short-lived signed URL, but only if the scan result permits it.
+class VersionNotFound(FileError):
+    """The requested version does not belong to this file, or is not a live version."""
 
-    Architecture.md §3 is the single source of truth for whether bytes may be served.
-    The decision is made against the **version**, not `files.scan_status`: since M4 an
-    admin override recorded on a version can permit a download that its status alone
-    would refuse, and the override deliberately lives only on the version so there is
-    one place that says whether access was granted (Schema.md §7).
+
+async def live_version(
+    db: AsyncSession, file: File, version_id: uuid.UUID
+) -> FileVersion:
+    """One of this file's retained, completed versions — or VersionNotFound.
+
+    Scoped by `file_id` in the query, not checked afterwards: a version id from another
+    file, or another workspace, must be indistinguishable from one that does not exist.
     """
-    version = await current_version(db, file)
+    result = await db.execute(
+        select(FileVersion).where(
+            FileVersion.id == version_id,
+            FileVersion.file_id == file.id,
+            FileVersion.deleted_at.is_(None),
+            FileVersion.upload_id.is_(None),
+        )
+    )
+    version = result.scalar_one_or_none()
     if version is None:
-        raise FileError("This file has no completed upload yet.")
+        raise VersionNotFound("That version does not exist for this file.")
+    return version
+
+
+async def download_url(
+    db: AsyncSession, file: File, version_id: uuid.UUID | None = None
+) -> tuple[str, FileVersion]:
+    """A short-lived signed URL for the current version, or for a named earlier one.
+
+    Architecture.md §3 is the single source of truth for whether bytes may be served,
+    and the decision is made against the **version** being served, not
+    `files.scan_status`: an older version is judged by its own scan result and its own
+    override, never by the current one's (Schema.md §7).
+
+    Returns the version actually served, so the audit entry records which one it was.
+    """
+    if version_id is None:
+        version = await current_version(db, file)
+        if version is None:
+            raise FileError("This file has no completed upload yet.")
+    else:
+        version = await live_version(db, file, version_id)
     if not scan.version_is_downloadable(version):
         raise FileError(scan.download_refusal_reason(version))
-    return storage.generate_download_url(version.storage_key, download_filename=file.name)
+    # An older version downloads under its own number, so two copies saved side by
+    # side are distinguishable rather than both called report.pdf.
+    filename = file.name if version.id == file.current_version_id else _versioned_name(
+        file.name, version.version_number
+    )
+    return storage.generate_download_url(version.storage_key, download_filename=filename), version
+
+
+def _versioned_name(name: str, number: int) -> str:
+    stem, dot, extension = name.rpartition(".")
+    if not dot or not stem:
+        return f"{name} (version {number})"
+    return f"{stem} (version {number}).{extension}"
+
+
+class RollbackRefused(FileError):
+    """A rollback that must not happen, with the reason the user should see."""
+
+
+async def rollback(
+    db: AsyncSession,
+    *,
+    workspace: Workspace,
+    file: File,
+    source: FileVersion,
+    user: User,
+) -> tuple[FileVersion, list[FileVersion]]:
+    """Copy an earlier version forward as the new current version (Architecture §4.9).
+
+    History is never rewritten: version k is copied server-side into a new version
+    N+1, which becomes current and records `restored_from_version_id`. Returns
+    (new_version, pruned_versions); the caller purges pruned objects after commit and
+    dispatches the checksum/scan chain for the new version.
+    """
+    if source.id == file.current_version_id:
+        raise RollbackRefused("That is already the current version.")
+    if source.scan_status is ScanStatus.FLAGGED:
+        # Otherwise rollback would launder a flagged file into a fresh version that
+        # starts life `pending` — briefly looking like an ordinary upload.
+        raise RollbackRefused(
+            "A version the malware scanner flagged cannot be restored. Release it "
+            "first if you have judged the detection to be a false positive."
+        )
+
+    # Quota is checked before any storage call, exactly as an upload's is: the copy is
+    # a new retained version and counts like one.
+    await quota.reserve(db, workspace.id, source.size_bytes)
+
+    version = FileVersion(
+        file_id=file.id,
+        version_number=await _next_version_number(db, file.id),
+        storage_key="",  # set once the id exists
+        size_bytes=source.size_bytes,
+        uploaded_by=user.id,
+        scan_status=initial_scan_status(),
+        # Byte-identical by construction (CopyObject, verified), so the source's
+        # checksum is this version's too. That lets compute_checksum skip re-reading
+        # the object, and the scan answer from the verdict cache at zero cost.
+        checksum_sha256=source.checksum_sha256,
+        restored_from_version_id=source.id,
+    )
+    db.add(version)
+    await db.flush()
+    version.storage_key = storage.build_storage_key(
+        workspace.id, file.id, version.id, file.name
+    )
+
+    storage.copy_object(source.storage_key, version.storage_key)
+    try:
+        file.current_version_id = version.id
+        file.size_bytes = version.size_bytes
+        file.scan_status = version.scan_status
+        file.updated_at = datetime.now(UTC)
+        await db.flush()
+        pruned = await prune_old_versions(db, workspace=workspace, file=file)
+    except Exception:
+        # The copy is an external side effect a rollback of this transaction cannot
+        # undo, so undo it here rather than leave an object nothing points at.
+        storage.delete_object(version.storage_key)
+        raise
+    return version, pruned
 
 
 async def list_in_flight(

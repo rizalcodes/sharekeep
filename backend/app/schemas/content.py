@@ -53,6 +53,9 @@ class FolderOut(BaseModel):
     name: str
     created_by: uuid.UUID
     created_at: datetime
+    # Permission indicator (Design.md §5, M7). Folders have no share links.
+    my_role: WorkspaceRole | None = None
+    explicit_grants: int = 0
 
 
 class BreadcrumbEntry(BaseModel):
@@ -91,6 +94,12 @@ class FileOut(BaseModel):
     created_by: uuid.UUID
     created_at: datetime
     updated_at: datetime
+    # The permission indicator (Design.md §5, M7): the viewer's own role on this item,
+    # resolved server-side by the same §4.1 rules that enforce it, and whether the item
+    # has live share links or explicit grants. Absent outside a listing.
+    my_role: WorkspaceRole | None = None
+    active_share_links: int = 0
+    explicit_grants: int = 0
 
 
 class FileUpdate(BaseModel):
@@ -167,6 +176,13 @@ class VersionOut(BaseModel):
     # risk deriving it differently from the server.
     is_downloadable: bool = False
     uploaded_by: uuid.UUID
+    # Resolved server-side (M7) so the versions panel can say who uploaded each one.
+    uploaded_by_email: str | None = None
+    uploaded_by_name: str | None = None
+    # Set on a version created by rollback, so it reads "restored from version 3"
+    # rather than as an ordinary upload (Architecture.md §4.9).
+    restored_from_version_id: uuid.UUID | None = None
+    restored_from_version_number: int | None = None
     created_at: datetime
     is_current: bool = False
 
