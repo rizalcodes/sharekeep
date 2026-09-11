@@ -226,6 +226,8 @@ Two invariants, both enforced server-side and both tested adversarially:
 
 **Invitation tokens never travel in a URL.** The preview endpoint is `POST /invitations/preview` with the token in the body, not `GET /invitations/{token}` — a web server writes full request paths into its access log verbatim, and an invitation token sitting in a log is workspace access for anyone who can read that log. Found during M1 manual validation by inspecting real container logs; the log redaction filter covers the same shape as a second layer.
 
+**The emailed invitation link carries its token in the URL fragment** (`/invitations#token=…`), specified in v1.9 after M6 was first marked done. The first M6 implementation put it in the query string — which is exactly what the rule above forbids, since the frontend server and the VPS reverse proxy log a query as faithfully as a path — and pointed at a page that did not exist, so every invitation email linked to a 404. A fragment is never sent to any server, so no access log on any hop can record it. The acceptance page reads the fragment, removes it from the address bar at once so it does not linger in history or on a shared screen, holds it in `sessionStorage` for the length of a sign-in or sign-up, and only ever sends it to the API in a POST body. The signup form shows the invited address locked rather than editable, because the server takes the address from the invitation and ignores the typed one — an editable field would let someone believe they had registered a different address.
+
 Invitation acceptance is bound to the invited address: a signed-in user whose email differs from the invitation's is **rejected**, never silently accepted. An invitation is a grant to one address, not a bearer token for whoever opens the link.
 
 ### 4.7 Reading the audit log
@@ -622,3 +624,14 @@ addresses `delivered@resend.dev` and `bounced@resend.dev` are exempt from that r
 are the only way the delivery and failure paths can be exercised, and six sends with no
 pause drew no 429 despite a documented 2/second ceiling. The limiter follows the
 documented figure, not the observed absence of one.
+
+**Added after M6 was first marked done (12 Sep 2026).** Item 10 was found by re-checking
+the finished milestone rather than by any test, and is recorded here rather than folded
+silently into the items above:
+
+10. **The invitation email linked to a page that did not exist, with its token in the
+    query string.** The suite asserted the token was *in* the email and the live run
+    proved Resend *accepted* it; nothing followed the link. Following it gave a 404, and
+    the query string contradicted §4.6's own rule that an invitation token never travels
+    in a URL a server can log. The link now uses the URL fragment, which no server ever
+    receives, and §4.6 states how the acceptance page handles it.
