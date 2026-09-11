@@ -221,6 +221,19 @@ Every resolution attempt against a share link that **exists** is written to `aud
 | Rename workspace, change quota | yes | no | no |
 | Delete workspace | yes | no | no |
 
+**An owner may lower their workspace's quota, never raise it past the platform's**
+(v1.10, decided at M7). The quota lives on the workspace (PRD §8), but a limit its own
+owner can raise without bound is not a limit: before M7 an owner could set any value,
+including one far beyond the 1 GB bucket every workspace shares. The accepted range is
+from current usage up to `default_storage_quota_bytes`; raising the platform ceiling is a
+configuration change, not a workspace setting. Found when designing the settings page,
+since that is what would have exposed it.
+
+**A member can leave a workspace** (v1.10). Invariant 1 below already spoke of an owner
+not being "allowed to leave", but nothing let anyone leave: a person invited into a
+workspace had no way out except asking an owner to remove them. `POST
+/workspaces/{id}/leave` removes the caller's own membership, subject to both invariants.
+
 Two invariants, both enforced server-side and both tested adversarially:
 
 1. **A workspace always has at least one owner.** The last owner cannot be demoted, removed, or allowed to leave. Otherwise the workspace is orphaned and nobody can ever administer it again.
@@ -755,5 +768,8 @@ Five things in *this* document were missing or wrong, and are fixed before any c
    folder-level grant, once made, was permanent. That is a security defect rather than a
    missing convenience: narrowing a grant is how access is taken away. Listing and
    revoking are now specified alongside creation, for files and folders alike.
+7. **Quota could be raised by the workspace's own owner without bound** (§4.6). Now
+   lower-only, decided by the developer.
+8. **Leaving a workspace was implied and missing** (§4.6).
 6. **The retention sweep was documented and never built** (§6b). Found while specifying
    the trash, because "whether it can still be restored" depends on it.

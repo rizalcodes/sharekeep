@@ -297,6 +297,9 @@ M8 stays deployment.
    already constrains.
 4. **Version rollback copies the chosen version forward as a new version** rather than
    moving the current-version pointer back (Architecture §4.9).
+5. **An owner may lower the workspace quota but not raise it past the platform ceiling.**
+   §8's "configurable at the workspace level" stands; a limit the limited party can lift
+   at will was not a limit. Found while designing the settings page (Architecture §4.6).
 
 ### Gaps found in the process, all closed in M7
 
