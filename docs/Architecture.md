@@ -447,6 +447,15 @@ bytes, or when the parent it would return to is itself deleted, stating which.
 Visible to editors and owners, the roles that can delete. A viewer cannot restore
 anything, so a list of things they cannot act on would be noise.
 
+**The retention sweep §6a describes did not exist.** `soft_delete_retention_days` had
+been in the configuration since M2 with no reader. Deleting released quota at once, but
+the bytes stayed in the bucket forever — so real bucket usage drifted above what quota
+accounted for, on a free plan with a 1 GB ceiling. A daily beat task now deletes the
+objects of versions deleted more than 30 days ago and stamps `file_versions.purged_at`,
+which is what makes the sweep idempotent and lets restore refuse cleanly: a batch with
+any purged version says the files are gone for good rather than reviving rows whose
+bytes no longer exist.
+
 ## 7. Deployment Architecture
 
 **Compose layout (decided at kickoff, 7 Sep 2026):** this project ships its **own** `docker-compose.yml` under its own Compose project name, on the same VPS as the paused n8n project — *not* merged into the n8n project's compose file. Same isolation intent as `Rules.md` §7, safer mechanics: no edit to a live stack's compose file, independent `up`/`down`/restart, and no chance of an unrelated change taking n8n's services with it. The two stacks meet only at an **external Docker network** shared with the existing reverse proxy.
@@ -746,3 +755,5 @@ Five things in *this* document were missing or wrong, and are fixed before any c
    folder-level grant, once made, was permanent. That is a security defect rather than a
    missing convenience: narrowing a grant is how access is taken away. Listing and
    revoking are now specified alongside creation, for files and folders alike.
+6. **The retention sweep was documented and never built** (§6b). Found while specifying
+   the trash, because "whether it can still be restored" depends on it.

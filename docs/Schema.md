@@ -126,6 +126,7 @@ Represents the current/latest state of a file. Version history is in `file_versi
 | `scan_override_reason` | text | optional | **Added v1.4.** The stated justification, required when an override is recorded. |
 | `deleted_at` | datetime | optional | Soft delete; set when the parent file is deleted or a single version is pruned |
 | `deletion_batch_id` | UUID | optional | **Added v1.3.** See `folders`. |
+| `purged_at` | datetime | optional | **Added v1.7.** Set when the retention sweep deleted this version's object from storage, 30 days after `deleted_at`. The row stays for audit; the bytes are gone, and restore refuses any batch containing a purged version (Architecture §6b) |
 | `restored_from_version_id` | UUID | optional | **Added v1.7.** → `file_versions.id`. Set when this version was created by rolling back to an earlier one (Architecture §4.9). The content is a server-side copy of that version, so the UI can say so rather than presenting it as a new upload |
 | `created_at` | datetime | required | — |
 
@@ -475,3 +476,5 @@ migration 0006 creates `notifications` and touches nothing that exists.
 3. **Tags are constrained per tag**, not only by count.
 4. **Trigram index on `files.name`** for substring search.
 5. **Grants are member-only in fact, not just in this document.**
+6. **`file_versions.purged_at`**, for the retention sweep that Architecture §6a
+   described and nothing implemented.
