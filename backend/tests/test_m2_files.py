@@ -15,7 +15,11 @@ async def _workspace(make_client, email: str, quota_bytes: int | None = None):
     client, _ = await new_user(make_client, email)
     ws = (await client.post(WS, json={"name": "Files"})).json()["id"]
     if quota_bytes is not None:
-        await client.patch(f"{WS}/{ws}", json={"storage_quota_bytes": quota_bytes})
+        # Asserted, not assumed. Until M7 this ignored the response; once quota became
+        # lower-only, a refused setup would have left the test silently running against
+        # the default quota and still passing for the wrong reason.
+        set_quota = await client.patch(f"{WS}/{ws}", json={"storage_quota_bytes": quota_bytes})
+        assert set_quota.status_code == 200, set_quota.text
     return client, ws
 
 
@@ -110,9 +114,10 @@ async def test_quota_blocks_an_upload_that_would_exceed_it(make_client):
 async def test_provider_file_size_ceiling_is_enforced(make_client):
     """A file above the provider's per-file limit is refused before any storage call,
     not part-way through the upload."""
-    client, ws = await _workspace(
-        make_client, "f-toobig@example.com", quota_bytes=10 * 1024 * 1024 * 1024
-    )
+    # No quota raise needed: the default (500 MB) already exceeds this 100 MB file, so
+    # the provider's 50 MB ceiling is what refuses it. Raising it to 10 GB, as this
+    # did before M7, is no longer something an owner can do (Architecture §4.6).
+    client, ws = await _workspace(make_client, "f-toobig@example.com")
     response = await client.post(
         f"{WS}/{ws}/uploads/init",
         json={"name": "huge.bin", "size_bytes": 100 * 1024 * 1024},

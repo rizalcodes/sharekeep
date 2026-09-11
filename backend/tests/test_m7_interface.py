@@ -699,3 +699,55 @@ def test_every_workspace_audit_write_records_a_label():
             if not has_label:
                 missing.append(f"{path.name}:{node.lineno} {action}")
     assert missing == [], "audit writes without a label: " + ", ".join(missing)
+
+
+# --- Quota is lower-only for owners; members can leave (Architecture §4.6) --------
+
+
+async def test_an_owner_cannot_raise_quota_past_the_platform_ceiling(make_client):
+    owner, ws, _ = await _workspace(make_client, "m7-q1@example.com")
+    from app.core.config import settings
+
+    refused = await owner.patch(
+        f"{WS}/{ws}", json={"storage_quota_bytes": settings.default_storage_quota_bytes + 1}
+    )
+    assert refused.status_code == 422
+    assert "platform" in refused.json()["detail"]
+
+
+async def test_an_owner_can_lower_quota_but_not_below_usage(make_client):
+    owner, ws, _ = await _workspace(make_client, "m7-q2@example.com")
+    await upload_file(owner, ws, "a.bin", size_bytes=5000)
+
+    lowered = await owner.patch(f"{WS}/{ws}", json={"storage_quota_bytes": 10_000})
+    assert lowered.status_code == 200
+    below = await owner.patch(f"{WS}/{ws}", json={"storage_quota_bytes": 4000})
+    assert below.status_code == 422
+    assert "already uses" in below.json()["detail"]
+
+
+async def test_a_member_can_leave_and_loses_access(make_client, db):
+    owner, ws, _ = await _workspace(make_client, "m7-lv1@example.com")
+    member, member_session = await new_user(make_client, "m7-lv1-m@example.com")
+    await _member(db, ws, member_session, WorkspaceRole.EDITOR)
+    assert (await member.get(f"{WS}/{ws}/folders")).status_code == 200
+
+    assert (await member.post(f"{WS}/{ws}/leave")).status_code == 204
+    assert (await member.get(f"{WS}/{ws}/folders")).status_code == 404
+
+    entry = (await _audits(db, ws, AuditAction.MEMBER_REMOVED))[-1]
+    assert entry.audit_metadata["left"] is True
+    assert entry.audit_metadata["label"] == "m7-lv1-m@example.com"
+
+
+async def test_the_last_owner_cannot_leave(make_client):
+    owner, ws, _ = await _workspace(make_client, "m7-lv2@example.com")
+    refused = await owner.post(f"{WS}/{ws}/leave")
+    assert refused.status_code == 409
+
+
+async def test_nobody_leaves_their_own_personal_workspace(make_client):
+    owner, session = await new_user(make_client, "m7-lv3@example.com")
+    personal = next(w for w in session["workspaces"] if w["is_personal"])
+    refused = await owner.post(f"{WS}/{personal['id']}/leave")
+    assert refused.status_code == 409

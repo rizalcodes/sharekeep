@@ -95,8 +95,9 @@ class InvitationOut(BaseModel):
 class InvitationCreated(BaseModel):
     """The raw token is returned exactly once, at creation.
 
-    Only the hash is stored. Until Resend arrives at M6 there is no email delivery, so
-    this is how the link reaches the invitee.
+    Only the hash is stored. Since M6 the invitation is also emailed (with the token in
+    the URL fragment, Architecture §4.6); this copy lets an owner pass it on directly if
+    the email is refused.
     """
 
     invitation: InvitationOut

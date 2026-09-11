@@ -18,7 +18,7 @@ from app.schemas.workspace import (
     WorkspaceOut,
     WorkspaceUpdate,
 )
-from app.services import audit, auth, permissions
+from app.services import audit, auth, permissions, quota
 
 router = APIRouter(prefix=f"{settings.api_v1_prefix}/workspaces", tags=["workspaces"])
 
@@ -95,6 +95,25 @@ async def update_workspace(
         payload.storage_quota_bytes is not None
         and payload.storage_quota_bytes != workspace.storage_quota_bytes
     ):
+        # Lower-only, up to the platform ceiling (Architecture §4.6, decided at M7).
+        # Before M7 an owner could set any value, including far past the bucket every
+        # workspace shares — a limit its own subject can lift is not a limit. Read under
+        # the row lock so an upload landing concurrently cannot slip under the floor.
+        locked = await quota.lock_workspace(db, workspace.id)
+        used = locked.storage_used_bytes if locked else workspace.storage_used_bytes
+        ceiling = settings.default_storage_quota_bytes
+        if payload.storage_quota_bytes > ceiling:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"The quota cannot be raised above the platform limit of {ceiling} bytes. "
+                "An owner can lower it, but raising the ceiling is a platform setting.",
+            )
+        if payload.storage_quota_bytes < used:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"This workspace already uses {used} bytes, so its quota cannot be set "
+                "below that. Delete files first.",
+            )
         changed["storage_quota_bytes"] = payload.storage_quota_bytes
         workspace.storage_quota_bytes = payload.storage_quota_bytes
 
@@ -112,6 +131,47 @@ async def update_workspace(
     await db.commit()
     await db.refresh(workspace)
     return _out(workspace, role)
+
+
+@router.post("/{workspace_id}/leave", status_code=status.HTTP_204_NO_CONTENT)
+async def leave_workspace(
+    request: Request,
+    access: ViewerAccess,
+    user: CurrentUser,
+    db: DbSession,
+) -> None:
+    """Remove your own membership (Architecture §4.6, v1.10).
+
+    The invariants already written for removal apply unchanged: the last owner cannot
+    leave, and the owner of a personal workspace cannot leave it. Before M7 nobody could
+    leave anything — a person invited into a workspace had to ask an owner to remove
+    them.
+    """
+    workspace, _ = access
+    member = await permissions.get_membership(db, workspace.id, user.id)
+    if member is None:  # unreachable behind ViewerAccess, but not assumed
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Workspace not found.")
+    role = member.role
+    try:
+        await permissions.remove_member(db, workspace, member)
+    except permissions.LastOwnerError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    await audit.record(
+        db,
+        action=AuditAction.MEMBER_REMOVED,
+        target_type=AuditTargetType.WORKSPACE_MEMBER,
+        target_id=member.id,
+        workspace_id=workspace.id,
+        actor_id=user.id,
+        request=request,
+        metadata={
+            "label": user.email,
+            "user_id": str(user.id),
+            "role": role.value,
+            "left": True,
+        },
+    )
+    await db.commit()
 
 
 @router.delete("/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT)
