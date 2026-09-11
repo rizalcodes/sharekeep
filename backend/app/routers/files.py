@@ -34,9 +34,9 @@ from app.schemas.content import (
     UploadPart,
     VersionOut,
 )
-from app.services import audit, permissions, quota, scan, storage
+from app.services import audit, notifications, permissions, quota, scan, storage
 from app.services import files as file_service
-from app.tasks import content_tasks
+from app.tasks import content_tasks, notification_tasks
 
 router = APIRouter(
     prefix=f"{settings.api_v1_prefix}/workspaces/{{workspace_id}}",
@@ -122,6 +122,16 @@ async def upload_init(
     storage call, so an oversized upload fails cleanly instead of part-way through.
     """
     workspace, _ = access
+    # Read before the try: a rollback expires every loaded instance, and reading an
+    # expired attribute afterwards attempts IO from a synchronous attribute access —
+    # which raises MissingGreenlet rather than refreshing. Found by running the quota
+    # test, not by reading the code.
+    workspace_id = workspace.id
+    workspace_name = workspace.name
+    actor_id = user.id
+    quota_available = max(
+        workspace.storage_quota_bytes - workspace.storage_used_bytes, 0
+    )
     try:
         await permissions.require_object_role(
             db,
@@ -151,10 +161,47 @@ async def upload_init(
             size_bytes=payload.size_bytes,
             user=user,
         )
+    except quota.QuotaExceeded as exc:
+        # QUOTA_EXCEEDED sat in the audit enum from M1 and was written by nothing until
+        # M6, so an audit reader offered a filter that could never match. A refused
+        # upload is a meaningful action (PRD §4).
+        #
+        # No rollback: `quota.reserve` refuses before it writes anything, so there is
+        # nothing to discard — only a row lock, which this commit releases. Rolling back
+        # here was the first attempt and was wrong twice over: it expired every loaded
+        # instance, so reading `user.id` a line later raised MissingGreenlet, and it
+        # discarded the caller's transaction wholesale rather than just this request's
+        # work. Both only showed up by running the test.
+        await audit.record(
+            db,
+            action=AuditAction.QUOTA_EXCEEDED,
+            target_type=AuditTargetType.WORKSPACE,
+            target_id=workspace_id,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            request=request,
+            metadata={
+                "label": workspace_name,
+                "attempted_name": payload.name,
+                "attempted_bytes": payload.size_bytes,
+                "available_bytes": quota_available,
+            },
+        )
+        await db.commit()
+        raise _translate(exc) from exc
     except Exception as exc:
         raise _translate(exc) from exc
 
+    # `quota.reserve` has already added the bytes to this same workspace instance, so
+    # the crossing is computed from the reservation rather than re-read (Architecture
+    # §5a: a warning is an edge, not a state).
+    warned = await notifications.notify_quota_warning(
+        db, workspace=workspace, reserved_bytes=payload.size_bytes
+    )
+    await db.flush()
+    queued = [row.id for row in warned]
     await db.commit()
+    notification_tasks.dispatch(queued)
     return UploadInitResponse(
         file_id=file.id,
         version_id=version.id,
@@ -200,6 +247,7 @@ async def upload_complete(
         actor_id=user.id,
         request=request,
         metadata={
+            "label": file.name,
             "version": version.version_number,
             "size_bytes": version.size_bytes,
             "pruned_versions": len(pruned),
@@ -349,6 +397,7 @@ async def override_scan(
         actor_id=user.id,
         request=request,
         metadata={
+            "label": file.name,
             "file_version_id": str(version.id),
             "file_name": file.name,
             "scan_status": version.scan_status.value,
@@ -436,7 +485,7 @@ async def delete_file(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"batch": str(batch_id), "name": file.name},
+        metadata={"label": file.name, "batch": str(batch_id), "name": file.name},
     )
     await db.commit()
     return DeletionReceipt(
@@ -470,7 +519,11 @@ async def restore_file(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"batch": str(payload.deletion_batch_id), "restored": restored},
+        metadata={
+            "label": f"{restored} file(s)",
+            "batch": str(payload.deletion_batch_id),
+            "restored": restored,
+        },
     )
     await db.commit()
     return {"restored": restored}
@@ -505,6 +558,9 @@ async def grant_on_file(
         )
     )
     grant = existing.scalar_one_or_none()
+    # Whether this is a grant or a raise decides whether anyone is told about it: v1
+    # notifies on gaining access, never on losing it (Architecture.md §5a).
+    previous_level = None if grant is None else grant.role.level
     if grant is None:
         grant = FilePermission(
             file_id=file.id,
@@ -518,6 +574,20 @@ async def grant_on_file(
         grant.granted_by = user.id
     await db.flush()
 
+    queued: list[uuid.UUID] = []
+    if previous_level is None or payload.role.level > previous_level:
+        notified = await notifications.notify_permission_granted(
+            db,
+            user_id=payload.user_id,
+            role=payload.role,
+            workspace=workspace,
+            target=file,
+            granted_by=user,
+        )
+        if notified is not None:
+            await db.flush()
+            queued.append(notified.id)
+
     await audit.record(
         db,
         action=AuditAction.PERMISSION_CHANGED,
@@ -530,6 +600,8 @@ async def grant_on_file(
     )
     await db.commit()
     await db.refresh(grant)
+    # After the commit, never inside it.
+    notification_tasks.dispatch(queued)
     return GrantOut(
         **GrantOut.model_validate(grant).model_dump(exclude={"email"}),
         email=target.email,
@@ -566,7 +638,12 @@ async def revoke_file_grant(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"user_id": str(user_id), "role": None, "revoked": True},
+        metadata={
+            "label": file.name,
+            "user_id": str(user_id),
+            "role": None,
+            "revoked": True,
+        },
     )
     await db.commit()
 
@@ -610,6 +687,7 @@ async def grant_on_folder(
         )
     )
     grant = existing.scalar_one_or_none()
+    previous_level = None if grant is None else grant.role.level
     if grant is None:
         grant = FilePermission(
             folder_id=folder.id,
@@ -623,6 +701,20 @@ async def grant_on_folder(
         grant.granted_by = user.id
     await db.flush()
 
+    queued: list[uuid.UUID] = []
+    if previous_level is None or payload.role.level > previous_level:
+        notified = await notifications.notify_permission_granted(
+            db,
+            user_id=payload.user_id,
+            role=payload.role,
+            workspace=workspace,
+            target=folder,
+            granted_by=user,
+        )
+        if notified is not None:
+            await db.flush()
+            queued.append(notified.id)
+
     await audit.record(
         db,
         action=AuditAction.PERMISSION_CHANGED,
@@ -635,6 +727,8 @@ async def grant_on_folder(
     )
     await db.commit()
     await db.refresh(grant)
+    # After the commit, never inside it.
+    notification_tasks.dispatch(queued)
     return GrantOut(
         **GrantOut.model_validate(grant).model_dump(exclude={"email"}),
         email=target.email,

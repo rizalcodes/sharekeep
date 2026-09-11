@@ -23,7 +23,8 @@ from app.schemas.workspace import (
     InvitationPreview,
     InvitationTokenRequest,
 )
-from app.services import audit, invitations
+from app.services import audit, invitations, notifications
+from app.tasks import notification_tasks
 
 router = APIRouter(prefix=settings.api_v1_prefix, tags=["invitations"])
 
@@ -62,13 +63,34 @@ async def create_invitation(
         request=request,
         # The email is recorded; the token never is — an audit log that stores the
         # token would hand out workspace access to anyone who can read the log.
-        metadata={"email": invitation.email, "role": invitation.role.value},
+        metadata={
+            "label": invitation.email,
+            "email": invitation.email,
+            "role": invitation.role.value,
+        },
     )
+
+    # The invitation email (Architecture.md §5a). This is the one notification allowed
+    # to carry a token, because the token *is* the invitation and the recipient may have
+    # no account through which to fetch it (Rules.md §3).
+    queued = await notifications.notify_workspace_invitation(
+        db,
+        email=invitation.email,
+        raw_token=raw_token,
+        workspace=workspace,
+        inviter=user,
+        role=invitation.role,
+    )
+    await db.flush()
+    queued_id = queued.id
     await db.commit()
     await db.refresh(invitation)
+    # After the commit: a worker must never see a row a rollback would have removed.
+    notification_tasks.dispatch([queued_id])
 
-    # Returned exactly once. Until Resend arrives at M6 this is how the link reaches
-    # the invitee.
+    # Still returned once, and still the only copy. The email is now the primary
+    # channel, but a send that the provider refuses must not make the invitation
+    # unusable — an owner can always pass this on themselves.
     return InvitationCreated(
         invitation=InvitationOut.model_validate(invitation), token=raw_token
     )
@@ -115,7 +137,7 @@ async def revoke_invitation(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"email": invitation.email},
+        metadata={"label": invitation.email, "email": invitation.email},
     )
     await db.commit()
 
@@ -177,7 +199,11 @@ async def accept_invitation(
         workspace_id=invitation.workspace_id,
         actor_id=user.id,
         request=request,
-        metadata={"role": invitation.role.value, "via": "signed_in"},
+        metadata={
+            "label": invitation.email,
+            "role": invitation.role.value,
+            "via": "signed_in",
+        },
     )
     await db.commit()
     await db.refresh(invitation)

@@ -88,7 +88,11 @@ async def signup(
             workspace_id=invitation.workspace_id,
             actor_id=user.id,
             request=request,
-            metadata={"role": invitation.role.value, "via": "signup"},
+            metadata={
+                "label": invitation.email,
+                "role": invitation.role.value,
+                "via": "signup",
+            },
         )
 
     await audit.record(
@@ -141,7 +145,7 @@ async def login(
             target_type=AuditTargetType.USER,
             request=request,
             # The attempted address is recorded; the password never is.
-            metadata={"email": email},
+            metadata={"label": email, "email": email},
         )
         await db.commit()
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, INVALID_CREDENTIALS)

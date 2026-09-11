@@ -31,8 +31,9 @@ from app.schemas.content import (
     ShareLinkOut,
     SharePreview,
 )
-from app.services import audit, permissions, shares, storage
+from app.services import audit, notifications, permissions, shares, storage
 from app.services import files as file_service
+from app.tasks import notification_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +167,7 @@ async def create_share(
         actor_id=user.id,
         request=request,
         metadata={
+            "label": file.name,
             "file_id": str(file.id),
             "file_name": file.name,
             "link_type": link.link_type.value,
@@ -174,8 +176,18 @@ async def create_share(
             "max_downloads": link.max_downloads,
         },
     )
+
+    # Only a private link has anyone to notify (Architecture.md §5a). The other three
+    # types are addressed to nobody in particular, and emailing the person who just
+    # pressed "create link" would be noise. The token is deliberately not in the email.
+    notified = await notifications.notify_file_shared(
+        db, link=link, file=file, workspace=workspace, sharer=user
+    )
+    await db.flush()
+    queued = [notified.id] if notified is not None else []
     await db.commit()
     await db.refresh(link)
+    notification_tasks.dispatch(queued)
 
     return ShareLinkCreated(
         **_out(link).model_dump(),
@@ -238,7 +250,11 @@ async def revoke_share(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"file_id": str(file.id), "file_name": file.name},
+        metadata={
+            "label": file.name,
+            "file_id": str(file.id),
+            "file_name": file.name,
+        },
     )
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -329,6 +345,9 @@ async def _audit_attempt(
         actor_id=requester.id if requester is not None else None,
         request=request,
         metadata={
+            # The file's name at the time. A denied attempt on a deleted file still
+            # needs to say what was asked for, and by then the row may be gone.
+            "label": file.name if file is not None else None,
             "file_id": str(link.file_id),
             "link_type": link.link_type.value,
             "denial_reason": resolution.denial.value if resolution.denial else None,

@@ -19,6 +19,7 @@ celery_app = Celery(
         "app.tasks.maintenance_tasks",
         "app.tasks.content_tasks",
         "app.tasks.scan_tasks",
+        "app.tasks.notification_tasks",
     ],
 )
 
@@ -54,6 +55,14 @@ celery_app.conf.beat_schedule = {
     "redrive-stalled-scans": {
         "task": "app.tasks.scan_tasks.redrive_stalled_scans",
         "schedule": crontab(minute="*/15"),
+    },
+    # Architecture.md §5b: a notification row is dispatched when it is queued, so
+    # this sweep is the recovery path — rows committed but never dispatched because the
+    # process died in between, and retries lost with a worker. Same reasoning as
+    # redrive-stalled-scans, and bounded so an outage does not become a send burst.
+    "sweep-pending-notifications": {
+        "task": "app.tasks.notification_tasks.sweep_pending_notifications",
+        "schedule": crontab(minute="*/10"),
     },
     # Supabase free-tier projects pause after 7 days of inactivity (PRD §10).
     # Daily is ample headroom; removed when the project returns to AWS S3.

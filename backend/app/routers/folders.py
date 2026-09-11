@@ -160,7 +160,11 @@ async def create_folder(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"name": folder.name, "parent": str(payload.parent_folder_id or "")},
+        metadata={
+            "label": folder.name,
+            "name": folder.name,
+            "parent": str(payload.parent_folder_id or ""),
+        },
     )
     await db.commit()
     await db.refresh(folder)
@@ -214,7 +218,11 @@ async def update_folder(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"renamed": payload.name is not None, "moved": payload.move},
+        metadata={
+            "label": folder.name,
+            "renamed": payload.name is not None,
+            "moved": payload.move,
+        },
     )
     await db.commit()
     await db.refresh(folder)
@@ -251,7 +259,12 @@ async def delete_folder(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"batch": str(batch_id), "folders": count, "bytes_released": released},
+        metadata={
+            "label": folder.name,
+            "batch": str(batch_id),
+            "folders": count,
+            "bytes_released": released,
+        },
     )
     await db.commit()
     return DeletionReceipt(
@@ -288,7 +301,11 @@ async def restore_folder(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"batch": str(payload.deletion_batch_id), "restored": restored},
+        metadata={
+            "label": f"{restored} folder(s)",
+            "batch": str(payload.deletion_batch_id),
+            "restored": restored,
+        },
     )
     await db.commit()
     return {"restored": restored, "bytes_reclaimed": reclaimed}

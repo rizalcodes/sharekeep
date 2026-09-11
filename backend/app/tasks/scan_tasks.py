@@ -34,7 +34,9 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.content import File, FileVersion
 from app.models.enums import AuditAction, AuditTargetType, ScanStatus
-from app.services import audit, scan, storage, virustotal, vt_budget
+from app.models.identity import Workspace
+from app.services import audit, notifications, scan, storage, virustotal, vt_budget
+from app.tasks import notification_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +64,15 @@ async def _reserve_or_raise() -> None:
     )
 
 
-async def _flag_audit(db, version: FileVersion, detail: dict[str, Any]) -> None:
-    """A flagged file is a security event, not a status change (Architecture.md §3 step 7)."""
+async def _flag_audit(db, version: FileVersion, detail: dict[str, Any]) -> list[uuid.UUID]:
+    """A flagged file is a security event, not a status change (Architecture.md §3 step 7).
+
+    Returns the ids of any notifications queued, so the caller can dispatch them after
+    its own commit rather than handing a worker a row a rollback might remove.
+    """
     file = await db.get(File, version.file_id)
     if file is None:
-        return
+        return []
     await audit.record(
         db,
         workspace_id=file.workspace_id,
@@ -78,12 +84,25 @@ async def _flag_audit(db, version: FileVersion, detail: dict[str, Any]) -> None:
         target_type=AuditTargetType.FILE,
         target_id=file.id,
         metadata={
+            "label": file.name,
             "file_version_id": str(version.id),
             "file_name": file.name,
             "uploaded_by": str(version.uploaded_by),
             "stats": detail.get("stats"),
         },
     )
+
+    # The uploader AND every workspace owner (Architecture.md §5a). The uploader needs
+    # to know their file is withheld; the owners need to know because §3d makes them the
+    # only people who can release it.
+    workspace = await db.get(Workspace, file.workspace_id)
+    if workspace is None:
+        return []
+    queued = await notifications.notify_scan_flagged(
+        db, file=file, version=version, workspace=workspace
+    )
+    await db.flush()
+    return [row.id for row in queued]
 
 
 async def _settle(version_id: uuid.UUID, verdict: virustotal.Verdict, checksum: str) -> str:
@@ -95,9 +114,12 @@ async def _settle(version_id: uuid.UUID, verdict: virustotal.Verdict, checksum: 
         await scan.apply_verdict(db, version, verdict)
         if not verdict.detail.get("from_cache"):
             await scan.remember_verdict(db, checksum, verdict)
+        queued: list[uuid.UUID] = []
         if verdict.is_flagged:
-            await _flag_audit(db, version, verdict.detail)
+            queued = await _flag_audit(db, version, verdict.detail)
         await db.commit()
+    # After the commit, never inside it.
+    notification_tasks.dispatch(queued)
     return verdict.status.value
 
 

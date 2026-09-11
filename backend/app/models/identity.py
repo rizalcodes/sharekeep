@@ -1,4 +1,4 @@
-"""Identity, workspace and audit entities (Schema.md §1-4, §10, §12).
+"""Identity, workspace, audit and notification entities (Schema.md §1-4, §10-§12).
 
 Constraints declared here are the ones Schema.md specifies. They live in the database
 rather than only in service code because an application-layer check is a convention,
@@ -16,6 +16,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     UniqueConstraint,
     text,
@@ -29,7 +30,15 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.config import DEFAULT_STORAGE_QUOTA_BYTES
 from app.models.base import Base, CreatedAtMixin, TimestampMixin, UUIDPrimaryKeyMixin
-from app.models.enums import AuditAction, AuditTargetType, InvitationStatus, WorkspaceRole
+from app.models.enums import (
+    AuditAction,
+    AuditTargetType,
+    InvitationStatus,
+    NotificationChannel,
+    NotificationStatus,
+    NotificationType,
+    WorkspaceRole,
+)
 
 
 def _pg_enum(enum_cls: type, name: str) -> SAEnum:
@@ -217,4 +226,66 @@ class AuditLog(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     __table_args__ = (
         Index("ix_audit_logs_workspace_id_created_at", "workspace_id", "created_at"),
         Index("ix_audit_logs_actor_id_created_at", "actor_id", "created_at"),
+    )
+
+
+class Notification(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Schema.md §11. Queued inside the caller's transaction, delivered by a Celery task
+    afterwards (Architecture.md §5).
+
+    The delivery columns are not bookkeeping for its own sake. Without them a transient
+    failure is indistinguishable from a permanent one, a worker restart loses the retry
+    count, and there is no way to tell a second send from a first — which matters more
+    here than almost anywhere else in this system, because an email that has gone out
+    cannot be recalled.
+    """
+
+    __tablename__ = "notifications"
+
+    # Nullable: a workspace invitation is addressed to someone who may have no account
+    # yet, which is the entire point of inviting them. A required user_id would have
+    # made this table unable to carry the one notification M1 explicitly deferred here.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=True
+    )
+    # Stored rather than derived from user_id, so the row records where the mail was
+    # actually sent and not where it would be sent today — the same append-only
+    # reasoning that puts a label in audit metadata.
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True
+    )
+    type: Mapped[NotificationType] = mapped_column(
+        _pg_enum(NotificationType, "notification_type"), nullable=False
+    )
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=text("'{}'"))
+    channel: Mapped[NotificationChannel] = mapped_column(
+        _pg_enum(NotificationChannel, "notification_channel"),
+        nullable=False,
+        server_default=NotificationChannel.EMAIL.value,
+    )
+    status: Mapped[NotificationStatus] = mapped_column(
+        _pg_enum(NotificationStatus, "notification_status"),
+        nullable=False,
+        server_default=NotificationStatus.PENDING.value,
+    )
+    # Resend's id for an accepted message. The whole reason this column exists is that
+    # our own record cannot answer a delivery question: the send-only key is refused
+    # 401 on GET /emails/{id}. A human can answer it from the dashboard, with this.
+    provider_message_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # The provider's own wording, not a paraphrase of it.
+    last_error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # Also the idempotency guard: a row that has one is never sent again, and the claim
+    # is taken under a row lock.
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Set when the sandbox redirect diverted this message, recording where it went. A
+    # redirected send must never be mistaken for a real one (Architecture.md §5c).
+    redirected_to: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        # The delivery task's only query: oldest pending rows first.
+        Index("ix_notifications_status_created_at", "status", "created_at"),
+        Index("ix_notifications_user_id_created_at", "user_id", "created_at"),
     )

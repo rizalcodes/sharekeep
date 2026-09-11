@@ -61,7 +61,11 @@ async def create_workspace(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"role": WorkspaceRole.OWNER.value, "reason": "workspace_created"},
+        metadata={
+            "label": workspace.name,
+            "role": WorkspaceRole.OWNER.value,
+            "reason": "workspace_created",
+        },
     )
     await db.commit()
     await db.refresh(workspace)
@@ -103,7 +107,7 @@ async def update_workspace(
             workspace_id=workspace.id,
             actor_id=user.id,
             request=request,
-            metadata={"changed": changed},
+            metadata={"label": workspace.name, "changed": changed},
         )
     await db.commit()
     await db.refresh(workspace)
@@ -129,7 +133,7 @@ async def delete_workspace(
         workspace_id=None,  # the workspace row is about to disappear
         actor_id=user.id,
         request=request,
-        metadata={"name": workspace.name},
+        metadata={"label": workspace.name, "name": workspace.name},
     )
     await db.delete(workspace)
     await db.commit()
@@ -197,6 +201,7 @@ async def change_role(
             actor_id=user.id,
             request=request,
             metadata={
+                "label": workspace.name,
                 "from": previous.value,
                 "to": member.role.value,
                 "user_id": str(member.user_id),
@@ -227,6 +232,10 @@ async def remove_member(
     member = await _load_member(db, workspace, member_id)
     removed_user_id = member.user_id
     removed_role = member.role
+    # Read before the row is removed: afterwards there is nothing to read
+    # it from, and the audit log needs the name the event actually had.
+    removed_user = await db.get(User, removed_user_id)
+    removed_email = removed_user.email if removed_user else str(removed_user_id)
 
     try:
         await permissions.remove_member(db, workspace, member)
@@ -241,6 +250,10 @@ async def remove_member(
         workspace_id=workspace.id,
         actor_id=user.id,
         request=request,
-        metadata={"user_id": str(removed_user_id), "role": removed_role.value},
+        metadata={
+            "label": removed_email,
+            "user_id": str(removed_user_id),
+            "role": removed_role.value,
+        },
     )
     await db.commit()

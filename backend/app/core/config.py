@@ -137,9 +137,38 @@ class Settings(BaseSettings):
     # object in memory.
     checksum_chunk_size_bytes: int = 1024 * 1024
 
-    # --- Resend ---
+    # --- Resend / notifications (Architecture.md §5) ---
     resend_api_key: SecretStr | None = None
-    resend_from_email: str = "noreply@example.com"
+    # Must be an address on a domain verified at resend.com/domains. Until one is,
+    # Resend's sandbox sender is the only value that works: an unverified domain is
+    # refused 403 on every send. The previous default here, noreply@example.com, was
+    # exactly that — a plausible-looking placeholder the provider rejects outright.
+    resend_from_email: str = "onboarding@resend.dev"
+    resend_api_base_url: str = "https://api.resend.com"
+    # While the sending domain is unverified Resend permits exactly ONE recipient: the
+    # account owner. Anyone else is a permanent 403. Setting this redirects every
+    # message there, with a banner in the body naming the intended recipient, so the
+    # five trigger paths that never address the owner can still be exercised end to
+    # end. Empty in production (Architecture.md §5c).
+    notification_redirect_to: str | None = None
+    # Resend documents 2 requests/second. Six back-to-back sends drew no 429 during the
+    # M6 probe, so this follows the documented figure rather than the observed absence.
+    resend_sends_per_second: float = 2.0
+    # Oldest-first batch size for one run of the delivery sweep.
+    notification_batch_size: int = 25
+    # Transient failures are retried up to this many times before the row is failed.
+    # A permanent refusal is never retried regardless (Architecture.md §5b).
+    notification_max_attempts: int = 5
+
+    @property
+    def notifications_enabled(self) -> bool:
+        """Whether there is a key to send with at all.
+
+        A missing key leaves queued rows `pending` rather than `failed` — nothing is
+        wrong with the notification, only with the configuration, and the same
+        distinction is drawn for scanning.
+        """
+        return bool(self.resend_api_key and self.resend_api_key.get_secret_value())
 
     # --- Share links (Architecture.md §4.4) ---
     # Per-IP ceiling on token resolution attempts: an unguessable token is only

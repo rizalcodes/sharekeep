@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.database import engine
 from app.core.logging import configure_logging
 from app.routers import (
+    audit,
     auth,
     files,
     folders,
@@ -75,6 +76,7 @@ app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(workspaces.router)
 app.include_router(invitations.router)
+app.include_router(audit.router)
 app.include_router(folders.router)
 app.include_router(files.router)
 app.include_router(shares.owner_router)

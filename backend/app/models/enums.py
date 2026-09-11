@@ -92,6 +92,37 @@ class ShareLinkType(enum.StrEnum):
     EXPIRING = "expiring"
 
 
+class NotificationType(enum.StrEnum):
+    """Schema.md §11. Recipients per type are Architecture.md §5a, and for three of
+    these the answer was not obvious enough to leave unwritten."""
+
+    FILE_SHARED = "file_shared"
+    PERMISSION_GRANTED = "permission_granted"
+    STORAGE_QUOTA_WARNING = "storage_quota_warning"
+    SCAN_FLAGGED = "scan_flagged"
+    WORKSPACE_INVITATION = "workspace_invitation"
+
+
+class NotificationChannel(enum.StrEnum):
+    """Only `email` in v1. The enum exists so a `websocket` channel can be added in
+    v1.1 with a new delivery task and no schema change (PRD §4)."""
+
+    EMAIL = "email"
+
+
+class NotificationStatus(enum.StrEnum):
+    PENDING = "pending"
+    # "The provider accepted it" — NOT "it was delivered". The restricted send-only API
+    # key cannot read a message's status back at all, so delivery is unobservable to us
+    # (Architecture.md §5b). Naming this `delivered` would claim what we cannot know.
+    SENT = "sent"
+    FAILED = "failed"
+
+    @property
+    def is_terminal(self) -> bool:
+        return self in (NotificationStatus.SENT, NotificationStatus.FAILED)
+
+
 class AuditAction(enum.StrEnum):
     """Schema.md §10. Only the M1 subset is exercised so far; the rest land with their
     milestones. The enum is created in full so later milestones need no migration."""
@@ -120,6 +151,9 @@ class AuditAction(enum.StrEnum):
     # Added at M4. Releasing a file the scanner flagged is exactly the kind of act an
     # audit log exists for, so this one is not optional (Architecture.md §3d).
     SCAN_OVERRIDE = "scan_override"
+    # In the enum since M1 and written by nothing until M6: `quota.py` raised
+    # QuotaExceeded and no audit row followed, so an audit reader offered a filter
+    # that could never match. A refused upload is a meaningful action (PRD §4).
     QUOTA_EXCEEDED = "quota_exceeded"
 
 

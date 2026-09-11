@@ -196,13 +196,20 @@ def stub_task_dispatch(monkeypatch, request):
 
         return delay
 
-    from app.tasks import content_tasks, scan_tasks
+    from app.tasks import content_tasks, notification_tasks, scan_tasks
 
     monkeypatch.setattr(
         content_tasks.compute_checksum, "delay", record("compute_checksum")
     )
     monkeypatch.setattr(
         scan_tasks.scan_file_version, "delay", record("scan_file_version")
+    )
+    # M6: the same reasoning, with more at stake. An un-stubbed notification dispatch
+    # against a live worker would not merely be rejected as unregistered — on a worker
+    # running this code it would send real email to whatever address the fixture
+    # invented, or to the redirect target, from every test run.
+    monkeypatch.setattr(
+        notification_tasks.deliver_notification, "delay", record("deliver_notification")
     )
     request.node.dispatched_tasks = dispatched
     return dispatched
