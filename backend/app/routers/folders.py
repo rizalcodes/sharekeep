@@ -118,6 +118,7 @@ async def _listing(db, workspace_id: uuid.UUID, folder: Folder | None, user) -> 
     return FolderListing(
         folder=FolderOut.model_validate(folder) if folder else None,
         breadcrumb=[BreadcrumbEntry(id=f.id, name=f.name) for f in trail],
+        my_role=marks["here"],
         folders=[
             FolderOut(**{**FolderOut.model_validate(f).model_dump(), **marks["folders"][f.id]})
             for f in folders
@@ -333,7 +334,7 @@ async def _indicator_facts(db, workspace_id, folder_id, user, files, folders) ->
     whether it is shared. A fixed number of grouped queries per listing, not per row."""
     file_ids = [f.id for f in files]
     folder_ids = [f.id for f in folders]
-    file_roles, folder_roles = await permissions.listing_roles(
+    file_roles, folder_roles, here = await permissions.listing_roles(
         db,
         workspace_id=workspace_id,
         user=user,
@@ -387,6 +388,7 @@ async def _indicator_facts(db, workspace_id, folder_id, user, files, folders) ->
         )
 
     return {
+        "here": here,
         "files": {
             fid: {
                 "my_role": file_roles.get(fid),

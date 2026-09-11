@@ -196,7 +196,12 @@ def stub_task_dispatch(monkeypatch, request):
 
         return delay
 
-    from app.tasks import content_tasks, notification_tasks, scan_tasks
+    from app.tasks import (
+        content_tasks,
+        maintenance_tasks,
+        notification_tasks,
+        scan_tasks,
+    )
 
     monkeypatch.setattr(
         content_tasks.compute_checksum, "delay", record("compute_checksum")
@@ -210,6 +215,9 @@ def stub_task_dispatch(monkeypatch, request):
     # invented, or to the redirect target, from every test run.
     monkeypatch.setattr(
         notification_tasks.deliver_notification, "delay", record("deliver_notification")
+    )
+    monkeypatch.setattr(
+        maintenance_tasks.purge_workspace_storage, "delay", record("purge_workspace_storage")
     )
     request.node.dispatched_tasks = dispatched
     return dispatched
@@ -230,12 +238,18 @@ def stub_storage(monkeypatch):
     with real bytes during M0, and is re-proven in M2 manual validation.
     """
     uploads: dict[str, list] = {}
+    # Object keys a test has "uploaded", so a prefix listing has something to find.
+    # The real `list_prefix` lists the live bucket.
+    stored: list[str] = []
     # Lets a test simulate parts that already landed, keyed by storage key.
     landed_parts: dict[str, list[int]] = {}
 
     def create_multipart_upload(storage_key, content_type):
         upload_id = f"upload-{len(uploads) + 1}"
         uploads[upload_id] = []
+        # Recorded so a prefix listing has something to find, the way the real bucket
+        # would after an upload.
+        stored.append(storage_key)
         return upload_id
 
     def presign_part(storage_key, upload_id, part_number):
@@ -305,6 +319,10 @@ def stub_storage(monkeypatch):
 
     monkeypatch.setattr(storage_module, "copy_object", copy_object)
     monkeypatch.setattr(storage_module, "purge_object", purge_object)
+    def list_prefix(prefix):
+        return [key for key in stored if key.startswith(prefix)]
+
+    monkeypatch.setattr(storage_module, "list_prefix", list_prefix)
 
     # The backstop. Every function above replaces one that would otherwise reach the
     # live Supabase bucket; a new storage function added without a stub here would do
@@ -326,6 +344,7 @@ def stub_storage(monkeypatch):
         "purged": purged,
         "purge_failures": purge_failures,
         "deleted": deleted,
+        "stored": stored,
     }
 
 

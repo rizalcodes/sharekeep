@@ -1,6 +1,14 @@
 import type {
   AuditAction,
   AuditPage,
+  DeletionReceipt,
+  DownloadResponse,
+  Grant,
+  Invitation,
+  Member,
+  TrashOut,
+  VersionOut,
+  WorkspaceOut,
   FolderListing,
   FolderOut,
   InvitationPreview,
@@ -14,6 +22,7 @@ import type {
   ShareLinkType,
   SharePreview,
   UploadInitResponse,
+  WorkspaceRole,
 } from "@/lib/types";
 
 const API_BASE_URL =
@@ -113,6 +122,8 @@ export const auth = {
       body: JSON.stringify({ email, password }),
     }),
   logout: () => apiFetch<void>("/auth/logout", { method: "POST" }),
+  /** Revokes every session this account has, on every device. */
+  logoutAll: () => apiFetch<{ revoked: number }>("/auth/logout-all", { method: "POST" }),
   me: () => apiFetch<Session>("/auth/me"),
 };
 
@@ -122,7 +133,120 @@ export const workspaces = {
   list: () => apiFetch<Session["workspaces"]>("/workspaces"),
   quota: (workspaceId: string) =>
     apiFetch<Quota>(`/workspaces/${workspaceId}/quota`),
+  get: (workspaceId: string) => apiFetch<WorkspaceOut>(`/workspaces/${workspaceId}`),
+  create: (name: string) =>
+    apiFetch<WorkspaceOut>("/workspaces", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  /** Quota is lower-only for owners, up to the platform ceiling (Architecture §4.6). */
+  update: (
+    workspaceId: string,
+    body: { name?: string; storage_quota_bytes?: number },
+  ) =>
+    apiFetch<WorkspaceOut>(`/workspaces/${workspaceId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  remove: (workspaceId: string) =>
+    apiFetch<void>(`/workspaces/${workspaceId}`, { method: "DELETE" }),
+  leave: (workspaceId: string) =>
+    apiFetch<void>(`/workspaces/${workspaceId}/leave`, { method: "POST" }),
 };
+
+export const members = {
+  list: (workspaceId: string) =>
+    apiFetch<Member[]>(`/workspaces/${workspaceId}/members`),
+  changeRole: (workspaceId: string, memberId: string, role: WorkspaceRole) =>
+    apiFetch<Member>(`/workspaces/${workspaceId}/members/${memberId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ role }),
+    }),
+  remove: (workspaceId: string, memberId: string) =>
+    apiFetch<void>(`/workspaces/${workspaceId}/members/${memberId}`, {
+      method: "DELETE",
+    }),
+  invitations: (workspaceId: string) =>
+    apiFetch<Invitation[]>(`/workspaces/${workspaceId}/invitations`),
+  invite: (workspaceId: string, email: string, role: WorkspaceRole) =>
+    apiFetch<{ invitation: Invitation; token: string }>(
+      `/workspaces/${workspaceId}/invitations`,
+      { method: "POST", body: JSON.stringify({ email, role }) },
+    ),
+  revokeInvitation: (workspaceId: string, invitationId: string) =>
+    apiFetch<void>(`/workspaces/${workspaceId}/invitations/${invitationId}`, {
+      method: "DELETE",
+    }),
+};
+
+/** Per-item actions. The server re-checks every role; the UI only hides what would be
+ * refused, it never grants anything (Design.md §5). */
+export const items = {
+  download: (workspaceId: string, fileId: string, versionId?: string) =>
+    apiFetch<DownloadResponse>(
+      `/workspaces/${workspaceId}/files/${fileId}/download${
+        versionId ? `?version_id=${encodeURIComponent(versionId)}` : ""
+      }`,
+    ),
+  versions: (workspaceId: string, fileId: string) =>
+    apiFetch<VersionOut[]>(`/workspaces/${workspaceId}/files/${fileId}/versions`),
+  rollback: (workspaceId: string, fileId: string, versionId: string) =>
+    apiFetch<VersionOut>(
+      `/workspaces/${workspaceId}/files/${fileId}/versions/${versionId}/restore`,
+      { method: "POST" },
+    ),
+  release: (workspaceId: string, fileId: string, versionId: string, reason: string) =>
+    apiFetch<VersionOut>(
+      `/workspaces/${workspaceId}/files/${fileId}/versions/${versionId}/scan-override`,
+      { method: "POST", body: JSON.stringify({ reason }) },
+    ),
+  updateFile: (
+    workspaceId: string,
+    fileId: string,
+    body: { name?: string; folder_id?: string | null; move?: boolean; tags?: string[] },
+  ) =>
+    apiFetch<unknown>(`/workspaces/${workspaceId}/files/${fileId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  updateFolder: (
+    workspaceId: string,
+    folderId: string,
+    body: { name?: string; parent_folder_id?: string | null; move?: boolean },
+  ) =>
+    apiFetch<unknown>(`/workspaces/${workspaceId}/folders/${folderId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteFile: (workspaceId: string, fileId: string) =>
+    apiFetch<DeletionReceipt>(`/workspaces/${workspaceId}/files/${fileId}`, {
+      method: "DELETE",
+    }),
+  deleteFolder: (workspaceId: string, folderId: string) =>
+    apiFetch<DeletionReceipt>(`/workspaces/${workspaceId}/folders/${folderId}`, {
+      method: "DELETE",
+    }),
+  restore: (workspaceId: string, kind: "file" | "folder", batchId: string) =>
+    apiFetch<unknown>(
+      `/workspaces/${workspaceId}/${kind === "folder" ? "folders" : "files"}/restore`,
+      { method: "POST", body: JSON.stringify({ deletion_batch_id: batchId }) },
+    ),
+  trash: (workspaceId: string) => apiFetch<TrashOut>(`/workspaces/${workspaceId}/trash`),
+  grants: (workspaceId: string, target: ItemRef) =>
+    apiFetch<Grant[]>(`/workspaces/${workspaceId}/${target.kind}s/${target.id}/grants`),
+  grant: (workspaceId: string, target: ItemRef, userId: string, role: WorkspaceRole) =>
+    apiFetch<Grant>(`/workspaces/${workspaceId}/${target.kind}s/${target.id}/grants`, {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId, role }),
+    }),
+  revokeGrant: (workspaceId: string, target: ItemRef, userId: string) =>
+    apiFetch<void>(
+      `/workspaces/${workspaceId}/${target.kind}s/${target.id}/grants/${userId}`,
+      { method: "DELETE" },
+    ),
+};
+
+export type ItemRef = { kind: "file" | "folder"; id: string; name: string };
 
 export const folders = {
   listing: (workspaceId: string, folderId?: string | null) =>

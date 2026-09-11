@@ -66,6 +66,9 @@ class BreadcrumbEntry(BaseModel):
 class FolderListing(BaseModel):
     folder: FolderOut | None
     breadcrumb: list[BreadcrumbEntry]
+    # The viewer's role HERE, so the interface can offer upload and new-folder only
+    # where they would be allowed (Design.md §5), rather than offer and then refuse.
+    my_role: WorkspaceRole | None = None
     folders: list[FolderOut]
     files: list[FileOut]
 

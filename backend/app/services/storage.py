@@ -308,6 +308,25 @@ def copy_object(source_key: str, destination_key: str) -> None:
         raise StorageError(f"Could not copy the stored version: {type(exc).__name__}") from exc
 
 
+def list_prefix(prefix: str) -> list[str]:
+    """Every object key under a prefix (Architecture.md §6c).
+
+    Paginated: verified against the live bucket, where `list_objects_v2` honours
+    `Prefix` and page size. There is deliberately no batched counterpart —
+    `delete_objects` is **refused** by Supabase, so callers delete one key at a time.
+    """
+    keys: list[str] = []
+    try:
+        paginator = get_storage_client().get_paginator("list_objects_v2")
+        for page in paginator.paginate(
+            Bucket=settings.supabase_storage_bucket, Prefix=prefix
+        ):
+            keys.extend(obj["Key"] for obj in page.get("Contents", []))
+    except (BotoCoreError, ClientError) as exc:
+        raise StorageError(f"Could not list {type(exc).__name__}") from exc
+    return keys
+
+
 def purge_object(storage_key: str) -> None:
     """Delete an object and RAISE if storage refuses (Architecture.md §6b).
 

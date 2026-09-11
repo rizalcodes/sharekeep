@@ -1,18 +1,26 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { ApiError, auth, folders, uploads, workspaces } from "@/lib/api";
+// Aliased: this page already has an `items` state for the upload queue, and the local
+// name would shadow the import silently.
+import {
+  ApiError,
+  folders,
+  items as itemApi,
+  uploads,
+  workspaces,
+  type ItemRef,
+} from "@/lib/api";
 import { formatBytes, formatRelative } from "@/lib/format";
 import type {
   FileOut,
   FolderListing,
+  FolderOut,
   InFlightUpload,
   Quota,
-  Session,
-  WorkspaceSummary,
+  WorkspaceRole,
 } from "@/lib/types";
+import { can, useWorkspace } from "@/lib/workspace-context";
 import {
   classify,
   describeFailure,
@@ -22,47 +30,52 @@ import {
   startPlan,
   type UploadItem,
 } from "@/lib/upload-manager";
+import { DeleteDialog, MoveDialog, RenameDialog } from "@/components/item-dialogs";
+import { PermissionsDialog } from "@/components/permissions-dialog";
+import { PermissionMark, RowMenu, type RowAction } from "@/components/row-menu";
 import { ScanBadge } from "@/components/scan-badge";
 import { ShareDialog } from "@/components/share-dialog";
 import { UploadQueue } from "@/components/upload-queue";
+import { VersionsDialog } from "@/components/versions-dialog";
+
+/**
+ * Which dialog is open, holding the item it acts on. Kept in state so the object stays
+ * the same while the dialog is open: the dialogs load their data keyed on it.
+ */
+type Open =
+  | { kind: "share"; file: FileOut }
+  | { kind: "versions"; file: FileOut }
+  | { kind: "rename"; item: ItemRef }
+  | { kind: "move"; item: ItemRef }
+  | { kind: "delete"; item: ItemRef }
+  | { kind: "permissions"; item: ItemRef }
+  | null;
+
+type Undo = { batchId: string; kind: "file" | "folder"; name: string };
 
 export default function FilesPage() {
-  const router = useRouter();
+  // The shell owns the session and the chosen workspace (M7). This page is re-mounted
+  // when the workspace changes, so it always starts at that workspace's root.
+  const { workspace } = useWorkspace();
 
-  const [session, setSession] = useState<Session | null>(null);
-  const [workspace, setWorkspace] = useState<WorkspaceSummary | null>(null);
   const [folderId, setFolderId] = useState<string | null>(null);
-  const [sharing, setSharing] = useState<FileOut | null>(null);
+  const [open, setOpen] = useState<Open>(null);
+  const [undo, setUndo] = useState<Undo | null>(null);
   const [listing, setListing] = useState<FolderListing | null>(null);
   const [quota, setQuota] = useState<Quota | null>(null);
   const [interrupted, setInterrupted] = useState<InFlightUpload[]>([]);
   const [items, setItems] = useState<UploadItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
 
   const controllers = useRef(new Map<string, AbortController>());
   const fileInput = useRef<HTMLInputElement>(null);
   const resumeInput = useRef<HTMLInputElement>(null);
   const resumeTarget = useRef<InFlightUpload | null>(null);
 
-  // --- Session -------------------------------------------------------------
-
-  useEffect(() => {
-    auth
-      .me()
-      .then((s) => {
-        setSession(s);
-        setWorkspace(s.workspaces[0] ?? null);
-      })
-      .catch(() => router.replace("/login"))
-      .finally(() => setLoading(false));
-  }, [router]);
-
   const requestSeq = useRef(0);
 
   const refresh = useCallback(async () => {
-    if (!workspace) return;
     const seq = ++requestSeq.current;
     const [listed, q, pending] = await Promise.all([
       folders.listing(workspace.id, folderId),
@@ -102,7 +115,6 @@ export default function FilesPage() {
 
   const drive = useCallback(
     async (item: UploadItem, resumeVersionId?: string) => {
-      if (!workspace) return;
       const controller = new AbortController();
       controllers.current.set(item.id, controller);
       patch(item.id, { status: "checking", error: undefined, failureKind: undefined });
@@ -150,7 +162,7 @@ export default function FilesPage() {
    */
   const enqueue = useCallback(
     (files: File[]) => {
-      if (!workspace || !quota) return;
+      if (!quota) return;
 
       // Account for what is already queued, or five files that each fit individually
       // could still overflow the workspace together.
@@ -203,7 +215,7 @@ export default function FilesPage() {
         .filter((i) => i.status === "queued")
         .forEach((i) => void drive(i));
     },
-    [workspace, quota, items, folderId, drive],
+    [quota, items, folderId, drive],
   );
 
   // --- Drag and drop -------------------------------------------------------
@@ -275,79 +287,53 @@ export default function FilesPage() {
   );
 
   async function discard(target: InFlightUpload) {
-    if (!workspace) return;
     await uploads.cancel(workspace.id, target.version_id).catch(() => undefined);
     await refresh();
   }
 
-  // --- Render --------------------------------------------------------------
+  // --- Item actions (M7) ---------------------------------------------------
 
-  if (loading) {
-    return <main className="p-8 text-sm text-ink-muted">Loading…</main>;
+  async function download(file: FileOut) {
+    setNotice(null);
+    try {
+      const { url } = await itemApi.download(workspace.id, file.id);
+      // The signed URL carries an attachment disposition, so this saves the file rather
+      // than navigating away from the app.
+      window.location.assign(url);
+    } catch (error) {
+      setNotice(
+        error instanceof ApiError ? error.message : "Could not start the download.",
+      );
+    }
   }
-  if (!session || !workspace) {
-    return <main className="p-8 text-sm text-ink-muted">No workspace available.</main>;
+
+  async function undoDelete(target: Undo) {
+    try {
+      await itemApi.restore(workspace.id, target.kind, target.batchId);
+      setUndo(null);
+      await refresh();
+    } catch (error) {
+      setNotice(error instanceof ApiError ? error.message : "Could not restore it.");
+    }
   }
+
+  function afterChange() {
+    setOpen(null);
+    void refresh();
+  }
+
+  // --- Render --------------------------------------------------------------
 
   const usedFraction = quota
     ? quota.storage_used_bytes / Math.max(quota.storage_quota_bytes, 1)
     : 0;
+  // The role HERE: at the workspace root the workspace role, inside a folder whatever
+  // §4.1 resolves for it. Adding is offered only where it would be allowed.
+  const roleHere: WorkspaceRole = listing?.my_role ?? workspace.role;
+  const canAdd = can(roleHere, "editor");
 
   return (
-    <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-10">
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="font-display text-xl font-semibold tracking-tight text-ink">
-            {workspace.name}
-          </h1>
-          <p className="mt-0.5 text-sm text-ink-muted">
-            {session.user.email} · {workspace.role}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {session.workspaces.length > 1 && (
-            <select
-              value={workspace.id}
-              onChange={(e) => {
-                const next = session.workspaces.find((w) => w.id === e.target.value);
-                if (next) {
-                  setWorkspace(next);
-                  setFolderId(null);
-                }
-              }}
-              className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-ink"
-            >
-              {session.workspaces.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}
-                </option>
-              ))}
-            </select>
-          )}
-          {/* Owners only: the log is owner-only server-side, so offering the link to
-              an editor would be an invitation to a refusal. Anyone who arrives by URL
-              is told why rather than shown a blank page (Design.md §5). */}
-          {workspace.role === "owner" && (
-            <Link
-              href="/activity"
-              className="rounded-md px-2.5 py-1.5 text-sm text-ink-muted transition-colors hover:bg-surface-sunken"
-            >
-              Activity
-            </Link>
-          )}
-          <button
-            type="button"
-            onClick={async () => {
-              await auth.logout().catch(() => undefined);
-              router.replace("/login");
-            }}
-            className="rounded-md px-2.5 py-1.5 text-sm text-ink-muted transition-colors hover:bg-surface-sunken"
-          >
-            Sign out
-          </button>
-        </div>
-      </header>
-
+    <main className="flex flex-1 flex-col">
       {quota && (
         <div className="mt-5">
           <div className="flex items-baseline justify-between text-xs text-ink-muted">
@@ -413,6 +399,7 @@ export default function FilesPage() {
         </section>
       )}
 
+      {canAdd ? (
       <div
         onDragOver={(e) => {
           e.preventDefault();
@@ -440,6 +427,12 @@ export default function FilesPage() {
           {quota && ` Up to ${formatBytes(quota.max_file_size_bytes)} per file.`}
         </p>
       </div>
+      ) : (
+        <p className="mt-6 rounded-lg border border-border bg-surface px-4 py-3 text-sm text-ink-muted">
+          You can view and download here, but not add to it — your role in this{" "}
+          {listing?.folder ? "folder" : "workspace"} is {roleHere}.
+        </p>
+      )}
 
       <input
         ref={fileInput}
@@ -470,6 +463,22 @@ export default function FilesPage() {
         </p>
       )}
 
+      {undo && (
+        <p
+          role="status"
+          className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-surface px-3 py-2 text-sm text-ink"
+        >
+          <span>&ldquo;{undo.name}&rdquo; moved to the trash.</span>
+          <button
+            type="button"
+            onClick={() => void undoDelete(undo)}
+            className="rounded px-2 py-0.5 text-sm text-primary hover:bg-primary-subtle"
+          >
+            Undo
+          </button>
+        </p>
+      )}
+
       <UploadQueue
         items={items}
         onCancel={(id) => controllers.current.get(id)?.abort()}
@@ -482,10 +491,15 @@ export default function FilesPage() {
 
       <Browser
         listing={listing}
-        onOpen={setFolderId}
-        onShare={setSharing}
+        workspaceRole={workspace.role}
+        canAdd={canAdd}
+        onOpen={(id) => {
+          setUndo(null);
+          setFolderId(id);
+        }}
+        onAction={setOpen}
+        onDownload={(file) => void download(file)}
         onNewFolder={async (name) => {
-          if (!workspace) return;
           try {
             await folders.create(workspace.id, name, folderId);
             await refresh();
@@ -497,14 +511,54 @@ export default function FilesPage() {
         }}
       />
 
-      {sharing && workspace && (
-        <ShareDialog
+      {open?.kind === "share" && (
+        <ShareDialog workspaceId={workspace.id} file={open.file} onClose={afterChange} />
+      )}
+      {open?.kind === "versions" && (
+        <VersionsDialog
           workspaceId={workspace.id}
-          file={sharing}
-          onClose={() => {
-            setSharing(null);
-            void refresh();
+          file={open.file}
+          canEdit={can(open.file.my_role ?? workspace.role, "editor")}
+          canRelease={can(workspace.role, "owner")}
+          onClose={() => setOpen(null)}
+          onChanged={() => void refresh()}
+        />
+      )}
+      {open?.kind === "rename" && (
+        <RenameDialog
+          workspaceId={workspace.id}
+          item={open.item}
+          onClose={() => setOpen(null)}
+          onDone={afterChange}
+        />
+      )}
+      {open?.kind === "move" && (
+        <MoveDialog
+          workspaceId={workspace.id}
+          item={open.item}
+          currentFolderId={folderId}
+          onClose={() => setOpen(null)}
+          onDone={afterChange}
+        />
+      )}
+      {open?.kind === "delete" && (
+        <DeleteDialog
+          workspaceId={workspace.id}
+          item={open.item}
+          onClose={() => setOpen(null)}
+          onDeleted={(batchId) => {
+            const target = open.item;
+            setUndo({ batchId, kind: target.kind, name: target.name });
+            afterChange();
           }}
+        />
+      )}
+      {open?.kind === "permissions" && (
+        <PermissionsDialog
+          workspaceId={workspace.id}
+          item={open.item}
+          onClose={() => setOpen(null)}
+          onChanged={() => void refresh()}
         />
       )}
     </main>
@@ -513,14 +567,20 @@ export default function FilesPage() {
 
 function Browser({
   listing,
+  workspaceRole,
+  canAdd,
   onOpen,
   onNewFolder,
-  onShare,
+  onAction,
+  onDownload,
 }: {
   listing: FolderListing | null;
+  workspaceRole: WorkspaceRole;
+  canAdd: boolean;
   onOpen: (id: string | null) => void;
   onNewFolder: (name: string) => void;
-  onShare: (file: FileOut) => void;
+  onAction: (open: Open) => void;
+  onDownload: (file: FileOut) => void;
 }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
@@ -531,8 +591,88 @@ function Browser({
 
   const empty = listing.folders.length === 0 && listing.files.length === 0;
 
+  /**
+   * Actions are built from the viewer's role on THAT item, not their workspace role: a
+   * grant can narrow or widen it per item (Architecture §4.1). Anything their role
+   * would not permit is absent rather than shown and then refused (Design.md §5).
+   */
+  function folderActions(folder: FolderOut): RowAction[] {
+    const role = folder.my_role ?? workspaceRole;
+    const ref: ItemRef = { kind: "folder", id: folder.id, name: folder.name };
+    const actions: RowAction[] = [{ label: "Open", onSelect: () => onOpen(folder.id) }];
+    if (can(role, "editor")) {
+      actions.push({
+        label: "Rename",
+        onSelect: () => onAction({ kind: "rename", item: ref }),
+      });
+      actions.push({ label: "Move", onSelect: () => onAction({ kind: "move", item: ref }) });
+    }
+    if (can(role, "owner")) {
+      actions.push({
+        label: "Permissions",
+        onSelect: () => onAction({ kind: "permissions", item: ref }),
+      });
+    }
+    if (can(role, "editor")) {
+      actions.push({
+        label: "Delete",
+        danger: true,
+        hint: "Everything inside goes to the trash.",
+        onSelect: () => onAction({ kind: "delete", item: ref }),
+      });
+    }
+    return actions;
+  }
+
+  function fileActions(file: FileOut): RowAction[] {
+    const role = file.my_role ?? workspaceRole;
+    const ref: ItemRef = { kind: "file", id: file.id, name: file.name };
+    const actions: RowAction[] = [];
+    if (file.is_downloadable) {
+      actions.push({ label: "Download", onSelect: () => onDownload(file) });
+    }
+    actions.push({
+      label: "Versions",
+      hint:
+        file.scan_status === "flagged" || file.scan_status === "scan_failed"
+          ? "Review the scan result here."
+          : undefined,
+      onSelect: () => onAction({ kind: "versions", file }),
+    });
+    // Share is offered only where it could succeed: stricter than downloadable, because
+    // a released flagged file is downloadable here and still not shareable (§4.2).
+    if (
+      can(role, "editor") &&
+      (file.scan_status === "clean" || file.scan_status === "scan_skipped")
+    ) {
+      actions.push({ label: "Share", onSelect: () => onAction({ kind: "share", file }) });
+    }
+    if (can(role, "editor")) {
+      actions.push({
+        label: "Rename",
+        onSelect: () => onAction({ kind: "rename", item: ref }),
+      });
+      actions.push({ label: "Move", onSelect: () => onAction({ kind: "move", item: ref }) });
+    }
+    if (can(role, "owner")) {
+      actions.push({
+        label: "Permissions",
+        onSelect: () => onAction({ kind: "permissions", item: ref }),
+      });
+    }
+    if (can(role, "editor")) {
+      actions.push({
+        label: "Delete",
+        danger: true,
+        hint: "Goes to the trash with every version.",
+        onSelect: () => onAction({ kind: "delete", item: ref }),
+      });
+    }
+    return actions;
+  }
+
   return (
-    <section className="mt-8 overflow-hidden rounded-lg border border-border bg-surface">
+    <section className="mt-8 rounded-lg border border-border bg-surface">
       <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-2.5">
         <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1 text-sm">
           <button
@@ -562,7 +702,7 @@ function Browser({
           ))}
         </nav>
 
-        {creating ? (
+        {!canAdd ? null : creating ? (
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -595,37 +735,55 @@ function Browser({
       </header>
 
       {empty ? (
-        <p className="px-4 py-8 text-center text-sm text-ink-muted">
-          Nothing here yet.
-        </p>
+        <p className="px-4 py-8 text-center text-sm text-ink-muted">Nothing here yet.</p>
       ) : (
         <ul className="divide-y divide-border">
           {listing.folders.map((folder) => (
-            <li key={folder.id}>
+            <li key={folder.id} className="flex items-center gap-3 px-4 py-2">
               <button
                 type="button"
                 onClick={() => onOpen(folder.id)}
-                className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-surface-sunken"
+                className="flex min-w-0 flex-1 items-center gap-3 rounded py-0.5 text-left"
               >
                 <FolderIcon />
-                <span className="truncate text-sm text-ink">{folder.name}</span>
+                <span className="truncate text-sm text-ink hover:underline">
+                  {folder.name}
+                </span>
               </button>
+              <PermissionMark
+                myRole={folder.my_role}
+                workspaceRole={workspaceRole}
+                grants={folder.explicit_grants}
+              />
+              <RowMenu label={folder.name} actions={folderActions(folder)} />
             </li>
           ))}
           {listing.files.map((file) => (
-            <li
-              key={file.id}
-              className="flex items-center gap-3 px-4 py-2.5"
-              title={
-                file.is_downloadable
-                  ? undefined
-                  : "This file cannot be downloaded in its current scan state."
-              }
-            >
+            <li key={file.id} className="flex items-center gap-3 px-4 py-2">
               <FileIcon />
-              <span className="min-w-0 flex-1 truncate text-sm text-ink">
-                {file.name}
-              </span>
+              {file.is_downloadable ? (
+                <button
+                  type="button"
+                  onClick={() => onDownload(file)}
+                  title="Download"
+                  className="min-w-0 flex-1 truncate text-left text-sm text-ink hover:underline"
+                >
+                  {file.name}
+                </button>
+              ) : (
+                <span
+                  className="min-w-0 flex-1 truncate text-sm text-ink"
+                  title="This file cannot be downloaded in its current scan state."
+                >
+                  {file.name}
+                </span>
+              )}
+              <PermissionMark
+                myRole={file.my_role}
+                workspaceRole={workspaceRole}
+                shareLinks={file.active_share_links}
+                grants={file.explicit_grants}
+              />
               <ScanBadge
                 status={file.scan_status}
                 reason={file.scan_reason}
@@ -635,27 +793,7 @@ function Browser({
               <span className="w-20 shrink-0 text-right font-mono text-xs text-ink-subtle">
                 {formatBytes(file.size_bytes)}
               </span>
-              {/* Offered only when the file could actually be shared. A share button
-                  that always opens a dialog which then refuses is worse than no button:
-                  the reason belongs where the decision is made. Note this is stricter
-                  than downloadable — a released flagged file is downloadable here and
-                  still not shareable (Architecture.md §4.2). */}
-              {file.scan_status === "clean" || file.scan_status === "scan_skipped" ? (
-                <button
-                  type="button"
-                  onClick={() => onShare(file)}
-                  className="shrink-0 rounded px-2 py-0.5 text-xs text-primary transition-colors hover:bg-primary-subtle"
-                >
-                  Share
-                </button>
-              ) : (
-                <span
-                  className="shrink-0 px-2 py-0.5 text-xs text-ink-subtle"
-                  title="This file cannot be shared in its current scan state."
-                >
-                  &mdash;
-                </span>
-              )}
+              <RowMenu label={file.name} actions={fileActions(file)} />
             </li>
           ))}
         </ul>

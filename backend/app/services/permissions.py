@@ -334,8 +334,14 @@ async def listing_roles(
     folder_id: uuid.UUID | None,
     file_ids: list[uuid.UUID],
     child_folder_ids: list[uuid.UUID],
-) -> tuple[dict[uuid.UUID, WorkspaceRole], dict[uuid.UUID, WorkspaceRole]]:
+) -> tuple[
+    dict[uuid.UUID, WorkspaceRole], dict[uuid.UUID, WorkspaceRole], WorkspaceRole | None
+]:
     """Every listed item's effective role, in a constant number of queries.
+
+    Also returns the role on the listed folder itself: the inherited role for its
+    contents IS the folder's own effective role, since its ancestor chain starts with
+    the folder. The interface gates upload and folder creation on it.
 
     The same §4.1 rules as `resolve_object_role`, restructured for a listing: every item
     in one folder shares that folder's ancestor chain, so the nearest inherited grant is
@@ -345,7 +351,7 @@ async def listing_roles(
     """
     membership = await get_membership(db, workspace_id, user.id)
     if membership is None:
-        return {}, {}
+        return {}, {}, None
 
     inherited = membership.role
     if folder_id is not None:
@@ -388,4 +394,5 @@ async def listing_roles(
     return (
         {fid: direct_files.get(fid, inherited) for fid in file_ids},
         {fid: direct_folders.get(fid, inherited) for fid in child_folder_ids},
+        inherited,
     )

@@ -751,3 +751,52 @@ async def test_nobody_leaves_their_own_personal_workspace(make_client):
     personal = next(w for w in session["workspaces"] if w["is_personal"])
     refused = await owner.post(f"{WS}/{personal['id']}/leave")
     assert refused.status_code == 409
+
+
+# --- Deleting a workspace purges its storage prefix (Architecture §6c) ------------
+
+
+async def test_deleting_a_workspace_dispatches_a_prefix_purge(make_client, request):
+    """The one hard delete in the system. Once the rows are gone nothing else can find
+    the objects — the retention sweep works from file_versions, which the cascade just
+    removed — so this dispatch is the only cleanup there will ever be."""
+    owner, ws, _ = await _workspace(make_client, "m7-wd1@example.com", name="Doomed")
+    await upload_file(owner, ws, "a.bin")
+    await upload_file(owner, ws, "b.bin")
+
+    assert (await owner.delete(f"{WS}/{ws}")).status_code == 204
+
+    dispatched = [
+        call for call in request.node.dispatched_tasks if call[0] == "purge_workspace_storage"
+    ]
+    assert dispatched[-1][1] == (ws,)
+
+
+async def test_the_purge_deletes_every_object_under_the_prefix(
+    make_client, stub_storage, sweep_session
+):
+    owner, ws, _ = await _workspace(make_client, "m7-wd2@example.com", name="Doomed")
+    other, other_ws, _ = await _workspace(make_client, "m7-wd2-o@example.com", name="Keep")
+    await upload_file(owner, ws, "a.bin")
+    await upload_file(owner, ws, "b.bin")
+    await upload_file(other, other_ws, "keep.bin")
+
+    result = await maintenance_tasks._purge_prefix(f"{ws}/")
+    assert result["found"] == 2
+    assert result["purged"] == 2
+    assert result["failed"] == 0
+    # Scoped to the prefix: another workspace's object is untouched.
+    assert all(key.startswith(f"{ws}/") for key in stub_storage["purged"])
+
+
+async def test_a_failed_object_is_reported_so_the_task_can_retry(
+    make_client, stub_storage, sweep_session
+):
+    owner, ws, _ = await _workspace(make_client, "m7-wd3@example.com", name="Doomed")
+    await upload_file(owner, ws, "a.bin")
+    stub_storage["purge_failures"].update(stub_storage["stored"])
+
+    result = await maintenance_tasks._purge_prefix(f"{ws}/")
+    assert result["found"] == 1
+    assert result["failed"] == 1
+    assert result["purged"] == 0

@@ -1,10 +1,9 @@
 "use client";
 
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, audit, auth } from "@/lib/api";
-import type { AuditAction, AuditEntry, Session, WorkspaceSummary } from "@/lib/types";
+import { ApiError, audit } from "@/lib/api";
+import type { AuditAction, AuditEntry } from "@/lib/types";
+import { useWorkspace } from "@/lib/workspace-context";
 import { AuditRow } from "@/components/audit-row";
 
 /**
@@ -35,7 +34,10 @@ const FILTERS: { label: string; actions: AuditAction[] }[] = [
     actions: ["share_access_denied", "login_failed", "quota_exceeded", "scan_flagged"],
   },
   { label: "Sharing", actions: ["share_created", "share_revoked", "share_accessed"] },
-  { label: "Files", actions: ["upload", "download", "delete", "version_restored"] },
+  {
+    label: "Files",
+    actions: ["upload", "download", "delete", "version_restored", "version_rolled_back"],
+  },
   {
     label: "People",
     actions: [
@@ -59,10 +61,10 @@ function asRefusal(caught: unknown): Refusal {
 }
 
 export default function ActivityPage() {
-  const router = useRouter();
+  // The shell owns the session and the chosen workspace (M7): opening Activity shows the
+  // workspace the user was just looking at, not the first one in their list.
+  const { workspace } = useWorkspace();
 
-  const [session, setSession] = useState<Session | null>(null);
-  const [workspace, setWorkspace] = useState<WorkspaceSummary | null>(null);
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [filter, setFilter] = useState(0);
@@ -74,28 +76,10 @@ export default function ActivityPage() {
   // Guards against a slow page landing after the filter has already moved on.
   const requestId = useRef(0);
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const me = await auth.me();
-        if (cancelled) return;
-        setSession(me);
-        setWorkspace(me.workspaces[0] ?? null);
-      } catch {
-        if (!cancelled) router.replace("/login");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [router]);
-
   // The first page, and every refiltered one. The fetch is awaited before any state is
   // touched: setting state synchronously in an effect body triggers cascading renders,
   // so the "loading" flag is raised by whatever *caused* the reload instead.
   useEffect(() => {
-    if (!workspace) return;
     const id = ++requestId.current;
     let cancelled = false;
 
@@ -129,7 +113,7 @@ export default function ActivityPage() {
    * replaces, and because a cursor is the *result* of a load — depending on it in an
    * effect would page forever. */
   const loadOlder = useCallback(async () => {
-    if (!workspace || !cursor) return;
+    if (!cursor) return;
     setLoadingMore(true);
     const id = requestId.current;
     try {
@@ -150,54 +134,15 @@ export default function ActivityPage() {
     }
   }, [workspace, cursor, filter, search]);
 
-  if (!session || !workspace) {
-    return (
-      <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-10">
-        <p className="text-sm text-ink-muted">Loading…</p>
-      </main>
-    );
-  }
-
   return (
-    <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-10">
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h1 className="font-display text-xl font-semibold tracking-tight text-ink">
-            Activity
-          </h1>
-          <p className="mt-0.5 text-sm text-ink-muted">
-            {workspace.name} · {session.user.email}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          {session.workspaces.length > 1 && (
-            <select
-              value={workspace.id}
-              onChange={(e) => {
-                const next = session.workspaces.find((w) => w.id === e.target.value);
-                if (next) {
-                  setLoading(true);
-                  setEntries([]);
-                  setCursor(null);
-                  setWorkspace(next);
-                }
-              }}
-              className="rounded-md border border-border bg-surface px-2 py-1.5 text-sm text-ink"
-            >
-              {session.workspaces.map((w) => (
-                <option key={w.id} value={w.id}>
-                  {w.name}
-                </option>
-              ))}
-            </select>
-          )}
-          <Link
-            href="/files"
-            className="rounded-md px-2.5 py-1.5 text-sm text-ink-muted transition-colors hover:bg-surface-sunken"
-          >
-            Files
-          </Link>
-        </div>
+    <main className="flex flex-1 flex-col">
+      <header>
+        <h1 className="font-display text-xl font-semibold tracking-tight text-ink">
+          Activity
+        </h1>
+        <p className="mt-0.5 text-sm text-ink-muted">
+          Everything that has happened in {workspace.name}, newest first.
+        </p>
       </header>
 
       {/* Owner-only is a policy, so the refusal explains the policy. */}

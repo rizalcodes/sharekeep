@@ -36,6 +36,9 @@ export type FolderOut = {
   name: string;
   created_by: string;
   created_at: string;
+  /** The viewer's own role on this folder, resolved server-side (Design.md §5). */
+  my_role?: WorkspaceRole | null;
+  explicit_grants?: number;
 };
 
 export type FileOut = {
@@ -62,11 +65,17 @@ export type FileOut = {
   created_by: string;
   created_at: string;
   updated_at: string;
+  /** Permission indicator data (Design.md §5, M7), present in a listing. */
+  my_role?: WorkspaceRole | null;
+  active_share_links?: number;
+  explicit_grants?: number;
 };
 
 export type FolderListing = {
   folder: FolderOut | null;
   breadcrumb: { id: string; name: string }[];
+  /** The viewer's role in this folder (M7); gates upload and new folder. */
+  my_role?: WorkspaceRole | null;
   folders: FolderOut[];
   files: FileOut[];
 };
@@ -188,6 +197,7 @@ export type AuditAction =
   | "delete"
   | "permission_changed"
   | "version_restored"
+  | "version_rolled_back"
   | "folder_created"
   | "folder_deleted"
   | "login"
@@ -240,3 +250,97 @@ export type InvitationPreview = {
   expires_at: string;
   requires_signup: boolean;
 };
+
+// --- M7a: the rest of the interface ---------------------------------------------
+
+export type WorkspaceOut = {
+  id: string;
+  name: string;
+  owner_id: string;
+  is_personal: boolean;
+  storage_quota_bytes: number;
+  storage_used_bytes: number;
+  created_at: string;
+  role: WorkspaceRole;
+};
+
+export type VersionOut = {
+  id: string;
+  version_number: number;
+  size_bytes: number;
+  checksum_sha256: string | null;
+  scan_status: ScanStatus;
+  scan_override_at: string | null;
+  scan_override_by: string | null;
+  scan_override_reason: string | null;
+  is_downloadable: boolean;
+  uploaded_by: string;
+  uploaded_by_email: string | null;
+  uploaded_by_name: string | null;
+  /** Set when this version was created by rolling back (Architecture.md §4.9). */
+  restored_from_version_number: number | null;
+  created_at: string;
+  is_current: boolean;
+};
+
+export type DownloadResponse = {
+  url: string;
+  expires_in_seconds: number;
+  scan_status: ScanStatus;
+};
+
+export type DeletionReceipt = {
+  deletion_batch_id: string;
+  items_deleted: number;
+  bytes_released: number;
+};
+
+export type Grant = {
+  id: string;
+  file_id: string | null;
+  folder_id: string | null;
+  user_id: string;
+  email: string | null;
+  role: WorkspaceRole;
+  granted_by: string;
+  created_at: string;
+};
+
+export type Member = {
+  id: string;
+  user_id: string;
+  email: string;
+  full_name: string;
+  role: WorkspaceRole;
+  created_at: string;
+};
+
+export type InvitationStatus = "pending" | "accepted" | "revoked" | "expired";
+
+export type Invitation = {
+  id: string;
+  workspace_id: string;
+  email: string;
+  role: WorkspaceRole;
+  status: InvitationStatus;
+  invited_by: string;
+  expires_at: string;
+  created_at: string;
+};
+
+export type TrashEntry = {
+  deletion_batch_id: string;
+  /** Also names the restore endpoint: folders/restore or files/restore. */
+  kind: "folder" | "file";
+  name: string;
+  folders: number;
+  files: number;
+  size_bytes: number;
+  deleted_at: string;
+  deleted_by_email: string | null;
+  purge_after: string;
+  restorable: boolean;
+  blocked_reason: string | null;
+};
+
+export type TrashOut = { entries: TrashEntry[]; retention_days: number };

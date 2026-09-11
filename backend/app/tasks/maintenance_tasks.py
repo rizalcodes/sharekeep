@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -169,3 +170,43 @@ async def _purge_expired() -> dict[str, Any]:
 @celery_app.task(name="app.tasks.maintenance_tasks.purge_expired_deletions")
 def purge_expired_deletions() -> dict[str, Any]:
     return _run(_purge_expired())
+
+
+async def _purge_prefix(prefix: str) -> dict[str, Any]:
+    keys = storage.list_prefix(prefix)
+    purged = 0
+    failed = 0
+    for key in keys:
+        try:
+            storage.purge_object(key)
+            purged += 1
+        except storage.StorageError:
+            failed += 1
+    return {"prefix": prefix, "found": len(keys), "purged": purged, "failed": failed}
+
+
+@celery_app.task(
+    name="app.tasks.maintenance_tasks.purge_workspace_storage",
+    bind=True,
+    max_retries=5,
+)
+def purge_workspace_storage(self, workspace_id: str) -> dict[str, Any]:
+    """Delete every object a deleted workspace held (Architecture.md §6c).
+
+    Dispatched after the workspace's rows are committed. Deleting a workspace is the one
+    hard delete in this system, so once those rows are gone nothing else can find the
+    objects: the retention sweep works from `file_versions`, which the cascade removed.
+
+    One request per object, because Supabase refuses S3's batch delete. Idempotent —
+    deleting an absent key succeeds — so a retry is always safe, and a partial run
+    simply finishes on the next attempt.
+    """
+    prefix = storage.workspace_prefix(uuid.UUID(workspace_id))
+    result = _run(_purge_prefix(prefix))
+    if result["failed"]:
+        logger.warning(
+            "workspace purge left %s object(s) behind, retrying", result["failed"]
+        )
+        raise self.retry(countdown=min(60 * 2**self.request.retries, 3600))
+    logger.info("purged %s object(s) for a deleted workspace", result["purged"])
+    return result

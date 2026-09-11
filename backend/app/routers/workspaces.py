@@ -19,6 +19,7 @@ from app.schemas.workspace import (
     WorkspaceUpdate,
 )
 from app.services import audit, auth, permissions, quota
+from app.tasks import maintenance_tasks
 
 router = APIRouter(prefix=f"{settings.api_v1_prefix}/workspaces", tags=["workspaces"])
 
@@ -195,8 +196,12 @@ async def delete_workspace(
         request=request,
         metadata={"label": workspace.name, "name": workspace.name},
     )
+    workspace_id = workspace.id
     await db.delete(workspace)
     await db.commit()
+    # After the commit, never inside it: the rows are gone, and this is the only thing
+    # that can still find the objects they pointed at (Architecture §6c).
+    maintenance_tasks.purge_workspace_storage.delay(str(workspace_id))
 
 
 @router.get("/{workspace_id}/members", response_model=list[MemberOut])

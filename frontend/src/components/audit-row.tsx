@@ -25,7 +25,9 @@ const PHRASING: Record<AuditAction, string> = {
   share_access_denied: "was refused a share link for",
   delete: "deleted",
   permission_changed: "changed permissions on",
-  version_restored: "restored",
+  // Named for history: this action has always meant restore-from-trash (Schema §10).
+  version_restored: "restored from the trash",
+  version_rolled_back: "rolled back",
   folder_created: "created the folder",
   folder_deleted: "deleted the folder",
   login: "signed in",
