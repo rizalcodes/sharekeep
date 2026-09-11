@@ -175,3 +175,57 @@ export type ShareDownload = {
   size_bytes: number;
   uses_remaining: number | null;
 };
+
+// --- Activity log (Architecture.md §4.7) ------------------------------------
+
+export type AuditAction =
+  | "upload"
+  | "download"
+  | "share_created"
+  | "share_revoked"
+  | "share_accessed"
+  | "share_access_denied"
+  | "delete"
+  | "permission_changed"
+  | "version_restored"
+  | "folder_created"
+  | "folder_deleted"
+  | "login"
+  | "login_failed"
+  | "logout"
+  | "member_added"
+  | "member_removed"
+  | "member_role_changed"
+  | "invitation_sent"
+  | "invitation_accepted"
+  | "invitation_revoked"
+  | "scan_flagged"
+  | "scan_override"
+  | "quota_exceeded";
+
+export type AuditEntry = {
+  id: string;
+  action: AuditAction;
+  target_type: string;
+  target_id: string | null;
+  /**
+   * The target's name **as recorded at the time**, not as it is now. Null for rows
+   * written before M6 established the convention — the log is append-only, so those
+   * cannot be backfilled and the interface must say so rather than invent a name.
+   */
+  label: string | null;
+  actor_id: string | null;
+  actor_email: string | null;
+  actor_name: string | null;
+  ip_address: string | null;
+  user_agent: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+};
+
+export type AuditPage = {
+  entries: AuditEntry[];
+  next_cursor: string | null;
+  /** Sign-ins belong to the account, not the workspace, so they are never here. */
+  excludes_account_events: boolean;
+};

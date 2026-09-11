@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ApiError, auth, folders, uploads, workspaces } from "@/lib/api";
 import { formatBytes, formatRelative } from "@/lib/format";
@@ -322,6 +323,17 @@ export default function FilesPage() {
                 </option>
               ))}
             </select>
+          )}
+          {/* Owners only: the log is owner-only server-side, so offering the link to
+              an editor would be an invitation to a refusal. Anyone who arrives by URL
+              is told why rather than shown a blank page (Design.md §5). */}
+          {workspace.role === "owner" && (
+            <Link
+              href="/activity"
+              className="rounded-md px-2.5 py-1.5 text-sm text-ink-muted transition-colors hover:bg-surface-sunken"
+            >
+              Activity
+            </Link>
           )}
           <button
             type="button"

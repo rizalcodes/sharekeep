@@ -9,9 +9,9 @@ has actually been performed, not when the code merely exists (Rules.md §6).
 | M1 | Auth + workspace + RBAC (Owner/Editor/Viewer), workspace invitations | **Done** (8 Sep 2026) |
 | M2 | File/folder CRUD, nested folders, per-object permissions, chunked upload API, quota | **Done** (8 Sep 2026) |
 | M3 | Upload UX: drag & drop, per-chunk progress, retry/resume, auth UI, folder browser | **Done** (9 Sep 2026) |
-| M4 | Malware scanning (Celery + VirusTotal) + file versioning | Not started |
-| M5 | Sharing: 4 link types, password protection, expiry, modifiers | Not started |
-| M6 | Audit log + email notifications (Resend) | Not started |
+| M4 | Malware scanning (Celery + VirusTotal) + file versioning | **Done** (10 Sep 2026) |
+| M5 | Sharing: 4 link types, password protection, expiry, modifiers | **Done** (11 Sep 2026) |
+| M6 | Audit log UI + email notifications (Resend) | **Done** (11 Sep 2026) |
 | M7 | Search/filter, frontend polish, design pass | Not started |
 | M8 | Deployment to the shared VPS, end-to-end verification | Not started |
 
@@ -717,3 +717,180 @@ The repo's own `frontend/AGENTS.md` exists to prompt exactly that check.
   notification pipeline is M6.
 - **`allowed_user_email` must already have an account.** Refused explicitly at creation
   rather than producing a link nobody can open.
+
+## M6 — Audit log UI + email notifications (Resend) · Done
+
+Branch `feature/m6-audit-notifications`. Status: complete, verified against the live
+stack including real Resend sends.
+
+### Verified rather than assumed, before designing
+
+The Resend API was probed first, and two findings changed the plan rather than
+decorating it:
+
+- **The configured sender was refused 403 on every send.** `noreply@example.com` is what
+  the project's configuration shipped with since M0 — a plausible-looking placeholder
+  the provider rejects outright, because its domain is unverified. M6 would not have
+  half-worked; it would have delivered nothing, and the reason would have looked like a
+  code fault.
+- **The key is restricted to sending.** `GET /emails/{id}`, `/domains` and `/api-keys`
+  all return 401. **Delivery is therefore unobservable to us** — we cannot know whether a
+  message arrived, bounced or was opened. That is a good posture for a leaked key and a
+  real constraint on what the schema may claim.
+- Without a verified domain the **only** permitted recipient is the account owner; anyone
+  else is a permanent 403 naming that address. Five of the six trigger paths could
+  otherwise never be exercised end to end.
+- **`delivered@resend.dev` and `bounced@resend.dev` are exempt** from that rule, which is
+  the only reason a real non-owner delivery could be proven at all.
+- **Six sends with no pause drew no 429**, despite a documented 2/second ceiling. The
+  limiter follows the documented figure: an unobserved limit is not an absent one.
+- Cloudflare fronts the API and refuses some clients by user agent with a bare
+  `error code: 1010` and no JSON. Found when urllib was blocked and curl was not, so the
+  client sets an explicit User-Agent and treats an unparseable body as transient rather
+  than reading it as a verdict.
+
+### Docs amended first
+
+Architecture §5 was rewritten rather than annotated (v1.9, §18) — its three bullets
+implied the status field tracked delivery, which the provider makes impossible. §4.7 is
+new. Four decisions were put to the developer and recorded in PRD §10d:
+
+1. **The audit log is owner-only.** §4.6 said who may administer a workspace and never
+   said who may read its history. The permissive default is not a convenience: the table
+   holds the IP address of every share-link visitor and every member's activity pattern.
+   Editors and viewers get 403, non-members 404.
+2. **`file_shared` notifies only a private link's named recipient.** The other three
+   types have nobody to notify, and emailing whoever just pressed "create link" is noise
+   dressed as a feature.
+3. **`scan_flagged` notifies the uploader *and* every owner**, deduplicated. Only owners
+   can release a flagged file (§3d); only the uploader knows why theirs vanished.
+4. **Mail is redirected in development**, with a banner naming the intended recipient and
+   the redirect recorded on the row.
+
+Schema went to v1.6: `notifications` gained `attempts`, `last_error`, `sent_at`,
+`provider_message_id` and `redirected_to`; `user_id` became nullable and `email` was
+added, because an invitation is addressed to someone who may have no account yet — the
+one notification M1 had explicitly deferred to M6 was the one the original table could
+not carry. `status = sent` is defined down to "the provider accepted it". §10 gained the
+`label` convention. Rules §3 gained two rules — what an email may contain, and why a
+send-only key is preferred — and §4's file tree was corrected, having drifted since M4.
+Design §5 gained nine entries; it had nothing about either surface.
+
+### Four things the docs had left standing
+
+Found while reading rather than while building, and all fixed here:
+
+- **`AuditAction.QUOTA_EXCEEDED` was written by nothing.** In the enum since M1, raised as
+  an exception by `quota.py`, and never audited — so an audit reader would offer a filter
+  that could not match a single event, and the empty result would read as "this never
+  happened".
+- **`storage_quota_warning_ratio = 0.9` had sat in the configuration since M0 with no
+  reader at all.** Now wired as an upward crossing, not a state: the obvious version
+  would email the owners on every upload for the life of the workspace.
+- **Invitations were never emailed.** M1 returned the raw token in the API response as an
+  explicit stopgap — the code comment said "Until Resend arrives at M6" — while §4.0 had
+  already reasoned about `SameSite=Lax` for the sake of a link in an email that did not
+  exist.
+- **Audit metadata recorded names inconsistently:** `download` stored `file_name`,
+  `delete` stored `name`, `upload` stored neither. Being append-only, the existing rows
+  cannot be corrected.
+
+### Delivered
+
+- `notifications` (migration 0006), three new enum types, five trigger points.
+- `services/resend.py` — the provider client, kept separate from the domain logic, with
+  transient/permanent/not-configured separated because retrying a refusal that is a
+  property of the configuration only burns free-tier budget.
+- `services/notifications.py` — queueing inside the caller's transaction, recipient
+  resolution per §5a, and plain-text-first rendering for all five types.
+- `tasks/notification_tasks.py` — delivery with the `sent_at` idempotency guard under a
+  row lock, retry state on the row rather than only in Celery, and a bounded sweep on the
+  beat schedule as the recovery path.
+- `GET /workspaces/{id}/audit` — owner-only, keyset paged on `(created_at, id)`, with
+  action filters and a label/actor search.
+- Frontend `/activity` — a dense reverse-chronological reading surface, refusals visually
+  distinct, the owner-only refusal explaining the policy, and the absence of sign-ins
+  explained rather than left looking like a gap.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| Backend suite | 282 passing (from 237), 0 skipped, ruff clean |
+| Frontend | eslint clean, `tsc --noEmit` clean, production build clean across 8 routes |
+| Migration | upgrade, downgrade, re-upgrade clean; parity test confirms it matches the models |
+| End-to-end | 31 checks against the live worker and live Resend, all passing |
+
+The live run proved the parts a stub cannot. An invitation queued by the API was picked
+up by the **separate worker process** and accepted by Resend, with the provider's message
+id and `sent_at` recorded. The redirect was applied *and* recorded, while the row still
+carried the address it was really for — so a redirected send cannot be mistaken for a
+real one. An unverified sender was classified permanent with the provider's own wording
+preserved verbatim. `delivered@resend.dev` proved a genuine non-owner delivery. The audit
+endpoint refused an editor who **was** a member with 403 and a non-member with 404, and
+contained no `login` rows. A refused upload wrote `quota_exceeded` with the attempted
+name. The quota warning fired once on the crossing and stayed at one across two further
+uploads above the threshold. A private share link's token was absent from the
+notification payload.
+
+**Idempotency was proven by the beat schedule rather than asserted.** The sweep ran
+repeatedly across the whole session while nine notifications sat in `sent`; every one
+still shows `attempts = 1`, and no row with `status = sent` ever took more than one
+attempt. The worker log records only the provider's message id — never a recipient or a
+subject line — which is the Rules §3 rule holding in practice.
+
+### Defects found by running it
+
+**Rolling back in the quota handler was wrong twice over.** Writing the `quota_exceeded`
+audit row after `await db.rollback()` raised `MissingGreenlet` — the rollback expires
+every loaded instance, so reading `user.id` on the next line attempted IO from a
+synchronous attribute access. Capturing the values first fixed that and exposed the
+second fault: the rollback discarded the caller's whole transaction, which in the test
+harness took the fixture data with it and produced a foreign-key violation against a
+workspace that no longer existed. No rollback is needed at all — `quota.reserve` refuses
+before it writes anything, and the commit releases the row lock it took. Two separate
+mistakes in four lines, neither visible by reading them.
+
+**The INET column hands back an `IPv4Address`, not a string**, which the response model
+rejected outright. Coerced at the boundary rather than by widening the schema's type: the
+API contract is a string either way, and widening it would let the shape vary by row.
+
+**`notify_file_shared` was written against a field that does not exist.** It read
+`link.allowed_user_email`; a private link stores `allowed_user_id`, which is precisely
+why M5 refuses to create one for an address with no account.
+
+**The validation script walked into the M4 event-loop bug.** `asyncio.run` per query
+invalidated the engine's pooled connections — "attached to a different loop", the exact
+failure `async_bridge` was written for at M4. Worth recording because it was my own new
+code repeating a fault the codebase had already solved and documented.
+
+**Two test-harness faults of my own, not the product's.** The new tests carried
+`@pytest.mark.anyio`, which forces anyio's own loop while this repo runs
+`asyncio_mode = "auto"` with a session-scoped one — a different loop, so every test
+failed before reaching any product code. And the live script's editor was never actually
+made a member, so its 404 was correct behaviour rather than the 403 the check expected;
+there is no "add member" endpoint by design, since membership comes only through an
+invitation bound to an address.
+
+`deliver_notification.delay` was added to the autouse dispatch stub. The M4 reasoning
+applies with more at stake: an un-stubbed dispatch against a live worker running this
+code would not merely be rejected as unregistered — it would send real email to whatever
+address a fixture invented, on every test run.
+
+### Open at the end of M6
+
+- **`status = sent` means the provider accepted it, not that it was delivered.** The
+  restricted key cannot tell us more. `provider_message_id` is stored so a human can
+  answer the rest from the dashboard.
+- **Only the account owner can receive mail** until a domain is verified at
+  resend.com/domains. Everything else is a permanent 403, which is why
+  `FILESHARE_NOTIFICATION_REDIRECT_TO` exists and must be empty in production.
+- **No in-app notification list.** PRD §4 is email-only for v1; `notifications.read_at`
+  exists for a future in-app surface and nothing reads it yet.
+- **Audit rows written in M1–M5 carry no `label`** for some actions. The log is
+  append-only, so the reader says the name was not recorded rather than resolving it live
+  — which would let a rename rewrite history.
+- **No audit-log retention policy.** Every share-link resolution appends a row and
+  nothing prunes them. Not a concern at portfolio scale, but it is unbounded growth.
+- **The audit log has no export.** Reading it in the browser is the only route.
+- **A revocation of access sends no email.** v1 notifies on gaining access only.

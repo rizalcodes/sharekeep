@@ -1,4 +1,6 @@
 import type {
+  AuditAction,
+  AuditPage,
   FolderListing,
   FolderOut,
   InFlightUpload,
@@ -197,6 +199,33 @@ export const publicShare = {
         body: JSON.stringify(password ? { password } : {}),
       },
     ),
+};
+
+// --- Activity log -----------------------------------------------------------
+//
+// Owner-only server-side (Architecture.md §4.7). A 403 here is a real answer, not a
+// bug to route around, so the caller surfaces the reason rather than an empty page.
+
+export const audit = {
+  page: (
+    workspaceId: string,
+    options: {
+      cursor?: string | null;
+      limit?: number;
+      action?: AuditAction[];
+      q?: string;
+    } = {},
+  ) => {
+    const params = new URLSearchParams();
+    if (options.limit) params.set("limit", String(options.limit));
+    if (options.cursor) params.set("cursor", options.cursor);
+    if (options.q) params.set("q", options.q);
+    for (const action of options.action ?? []) params.append("action", action);
+    const query = params.toString();
+    return apiFetch<AuditPage>(
+      `/workspaces/${workspaceId}/audit${query ? `?${query}` : ""}`,
+    );
+  },
 };
 
 export function fetchReadiness(): Promise<ReadinessResponse> {
