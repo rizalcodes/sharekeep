@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime
 
@@ -21,6 +22,13 @@ def _clean_name(value: str) -> str:
     if trimmed in (".", ".."):
         raise ValueError("Name cannot be '.' or '..'.")
     return trimmed
+
+
+# Schema.md §6 (v1.7). Unicode letters and digits are allowed: a tag is a label a person
+# writes, and restricting it to ASCII would be an English-only assumption.
+MAX_TAGS_PER_FILE = 25
+MAX_TAG_LENGTH = 40
+_TAG_PATTERN = re.compile(r"^[^\W_](?:[\w \-.]*[^\W_])?$", re.UNICODE)
 
 
 class FolderCreate(BaseModel):
@@ -119,11 +127,28 @@ class FileUpdate(BaseModel):
     @field_validator("tags")
     @classmethod
     def _tags(cls, v: list[str] | None) -> list[str] | None:
+        """Normalise and bound each tag, not just the count (Schema.md §6, v1.7).
+
+        Until M7 only the count was limited, so a single tag could be arbitrarily long
+        and hold anything. Tags are matched exactly by the filter and shown on file rows,
+        so they are normalised here — lowercased, trimmed, de-duplicated — rather than at
+        every place that reads them.
+        """
         if v is None:
             return None
         cleaned = [t.strip().lower() for t in v if t.strip()]
-        if len(cleaned) > 25:
-            raise ValueError("At most 25 tags.")
+        if len(cleaned) > MAX_TAGS_PER_FILE:
+            raise ValueError(f"At most {MAX_TAGS_PER_FILE} tags.")
+        for tag in cleaned:
+            if len(tag) > MAX_TAG_LENGTH:
+                raise ValueError(
+                    f"A tag can be at most {MAX_TAG_LENGTH} characters: {tag[:20]}…"
+                )
+            if not _TAG_PATTERN.match(tag):
+                raise ValueError(
+                    "A tag can contain letters, digits, spaces, hyphens, underscores "
+                    f"and dots: {tag!r} cannot be used."
+                )
         return sorted(set(cleaned))
 
 

@@ -18,6 +18,7 @@ from app.routers import (
     folders,
     health,
     invitations,
+    search,
     shares,  # noqa: F401
     trash,
     workspaces,
@@ -79,6 +80,7 @@ app.include_router(workspaces.router)
 app.include_router(invitations.router)
 app.include_router(audit.router)
 app.include_router(trash.router)
+app.include_router(search.router)
 app.include_router(folders.router)
 app.include_router(files.router)
 app.include_router(shares.owner_router)

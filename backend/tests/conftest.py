@@ -34,6 +34,7 @@ def anyio_backend() -> str:
 # each other, and the suite leaves the database exactly as it found it.
 
 import httpx  # noqa: E402
+from sqlalchemy import text  # noqa: E402
 from sqlalchemy.ext.asyncio import (  # noqa: E402
     AsyncSession,
     async_sessionmaker,
@@ -58,6 +59,11 @@ async def db_engine():
     # model/migration divergence cannot hide here. A separate test asserts the
     # migration produces the same shape.
     async with engine.begin() as conn:
+        # The models declare trigram indexes (M7b), so the schema cannot be created
+        # without pg_trgm — exactly as the real database cannot, which is why migration
+        # 0008 creates it there. Without this the whole suite errors at setup with
+        # `operator class "gin_trgm_ops" does not exist`.
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield engine

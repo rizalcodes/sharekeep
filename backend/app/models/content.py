@@ -75,6 +75,12 @@ class Folder(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteBatchMixin, Base):
     )
 
     __table_args__ = (
+        Index(
+            "ix_folders_name_trgm",
+            "name",
+            postgresql_using="gin",
+            postgresql_ops={"name": "gin_trgm_ops"},
+        ),
         # Postgres treats NULLs as distinct in unique indexes, which would let a
         # workspace hold many root folders of the same name. NULLS NOT DISTINCT (PG15+)
         # is the honest fix; we run Postgres 16 (Schema.md §5 left the choice to
@@ -150,6 +156,14 @@ class File(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteBatchMixin, Base):
         Index("ix_files_workspace_id_folder", "workspace_id", "folder_id"),
         Index("ix_files_deletion_batch_id", "deletion_batch_id"),
         Index("ix_files_tags", "tags", postgresql_using="gin"),
+        # Substring search on names: ILIKE '%term%' cannot use a B-tree, so the name
+        # column is indexed by trigram (pg_trgm, created in migration 0008).
+        Index(
+            "ix_files_name_trgm",
+            "name",
+            postgresql_using="gin",
+            postgresql_ops={"name": "gin_trgm_ops"},
+        ),
     )
 
 
