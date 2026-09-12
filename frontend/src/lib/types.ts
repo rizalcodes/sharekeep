@@ -344,3 +344,55 @@ export type TrashEntry = {
 };
 
 export type TrashOut = { entries: TrashEntry[]; retention_days: number };
+
+// --- M7b: search (Architecture.md §4.8) ----------------------------------------
+
+export type FileCategory =
+  | "image"
+  | "video"
+  | "audio"
+  | "spreadsheet"
+  | "presentation"
+  | "archive"
+  | "document"
+  | "other";
+
+export type SearchHit = {
+  kind: "file" | "folder";
+  id: string;
+  name: string;
+  /** Where it lives, so a result never has to be opened to find out. */
+  path: { id: string; name: string }[];
+  updated_at: string;
+  size_bytes: number | null;
+  mime_type: string | null;
+  category: FileCategory | null;
+  scan_status: ScanStatus | null;
+  is_downloadable: boolean;
+  tags: string[];
+  folder_id: string | null;
+};
+
+export type SearchOut = {
+  results: SearchHit[];
+  next_cursor: string | null;
+  /** True when a file-only filter is active, so folders could not be judged. */
+  folders_excluded: boolean;
+  categories: FileCategory[];
+};
+
+export type TagCount = { tag: string; files: number };
+
+export type SearchParams = {
+  q?: string;
+  tag?: string[];
+  category?: string | null;
+  size_min?: number | null;
+  size_max?: number | null;
+  modified_after?: string | null;
+  modified_before?: string | null;
+  uploaded_by?: string | null;
+  scan_status?: ScanStatus | null;
+  limit?: number;
+  cursor?: string | null;
+};

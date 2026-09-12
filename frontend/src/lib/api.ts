@@ -6,6 +6,9 @@ import type {
   Grant,
   Invitation,
   Member,
+  SearchOut,
+  SearchParams,
+  TagCount,
   TrashOut,
   VersionOut,
   WorkspaceOut,
@@ -356,6 +359,25 @@ export const invitations = {
       method: "POST",
       body: JSON.stringify({ token }),
     }),
+};
+
+// --- Search (Architecture.md §4.8) -------------------------------------------
+
+export const search = {
+  run: (workspaceId: string, params: SearchParams) => {
+    const query = new URLSearchParams();
+    for (const [key, value] of Object.entries(params)) {
+      if (value === null || value === undefined || value === "") continue;
+      if (Array.isArray(value)) value.forEach((item) => query.append(key, item));
+      else query.set(key, String(value));
+    }
+    const suffix = query.toString();
+    return apiFetch<SearchOut>(
+      `/workspaces/${workspaceId}/search${suffix ? `?${suffix}` : ""}`,
+    );
+  },
+  /** Tags in use, with counts, so the exact-match filter can offer what exists. */
+  tags: (workspaceId: string) => apiFetch<TagCount[]>(`/workspaces/${workspaceId}/tags`),
 };
 
 // --- Activity log -----------------------------------------------------------

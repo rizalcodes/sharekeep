@@ -22,6 +22,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const nav = [
     { href: "/files", label: "Files", show: true },
+    { href: "/search", label: "Search", show: true },
     { href: "/members", label: "Members", show: true },
     { href: "/activity", label: "Activity", show: can(workspace.role, "owner") },
     { href: "/trash", label: "Trash", show: can(workspace.role, "editor") },

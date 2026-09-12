@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 // Aliased: this page already has an `items` state for the upload queue, and the local
 // name would shadow the import silently.
 import {
@@ -36,6 +37,7 @@ import { PermissionMark, RowMenu, type RowAction } from "@/components/row-menu";
 import { ScanBadge } from "@/components/scan-badge";
 import { ShareDialog } from "@/components/share-dialog";
 import { UploadQueue } from "@/components/upload-queue";
+import { TagList, TagsDialog } from "@/components/tags-dialog";
 import { VersionsDialog } from "@/components/versions-dialog";
 
 /**
@@ -49,6 +51,7 @@ type Open =
   | { kind: "move"; item: ItemRef }
   | { kind: "delete"; item: ItemRef }
   | { kind: "permissions"; item: ItemRef }
+  | { kind: "tags"; file: FileOut }
   | null;
 
 type Undo = { batchId: string; kind: "file" | "folder"; name: string };
@@ -57,7 +60,12 @@ export default function FilesPage() {
   // The shell owns the session and the chosen workspace (M7). This page is re-mounted
   // when the workspace changes, so it always starts at that workspace's root.
   const { workspace } = useWorkspace();
+  const router = useRouter();
 
+  // A folder result on the search page links here with ?folder=…, so opening one
+  // lands in it rather than at the workspace root. Read from `location` rather than
+  // useSearchParams, which would put this page behind a Suspense boundary it does not
+  // otherwise need.
   const [folderId, setFolderId] = useState<string | null>(null);
   const [open, setOpen] = useState<Open>(null);
   const [undo, setUndo] = useState<Undo | null>(null);
@@ -72,6 +80,18 @@ export default function FilesPage() {
   const fileInput = useRef<HTMLInputElement>(null);
   const resumeInput = useRef<HTMLInputElement>(null);
   const resumeTarget = useRef<InFlightUpload | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (cancelled) return;
+      const requested = new URLSearchParams(window.location.search).get("folder");
+      if (requested) setFolderId(requested);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const requestSeq = useRef(0);
 
@@ -499,6 +519,7 @@ export default function FilesPage() {
         }}
         onAction={setOpen}
         onDownload={(file) => void download(file)}
+        onSearchTag={(tag) => router.push(`/search?tag=${encodeURIComponent(tag)}`)}
         onNewFolder={async (name) => {
           try {
             await folders.create(workspace.id, name, folderId);
@@ -553,6 +574,15 @@ export default function FilesPage() {
           }}
         />
       )}
+      {open?.kind === "tags" && (
+        <TagsDialog
+          workspaceId={workspace.id}
+          item={{ kind: "file", id: open.file.id, name: open.file.name }}
+          initial={open.file.tags}
+          onClose={() => setOpen(null)}
+          onSaved={afterChange}
+        />
+      )}
       {open?.kind === "permissions" && (
         <PermissionsDialog
           workspaceId={workspace.id}
@@ -573,6 +603,7 @@ function Browser({
   onNewFolder,
   onAction,
   onDownload,
+  onSearchTag,
 }: {
   listing: FolderListing | null;
   workspaceRole: WorkspaceRole;
@@ -581,6 +612,7 @@ function Browser({
   onNewFolder: (name: string) => void;
   onAction: (open: Open) => void;
   onDownload: (file: FileOut) => void;
+  onSearchTag: (tag: string) => void;
 }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
@@ -648,6 +680,11 @@ function Browser({
       actions.push({ label: "Share", onSelect: () => onAction({ kind: "share", file }) });
     }
     if (can(role, "editor")) {
+      actions.push({
+        label: "Tags",
+        hint: "Used by search.",
+        onSelect: () => onAction({ kind: "tags", file }),
+      });
       actions.push({
         label: "Rename",
         onSelect: () => onAction({ kind: "rename", item: ref }),
@@ -778,6 +815,7 @@ function Browser({
                   {file.name}
                 </span>
               )}
+              <TagList tags={file.tags} onSelect={onSearchTag} />
               <PermissionMark
                 myRole={file.my_role}
                 workspaceRole={workspaceRole}
