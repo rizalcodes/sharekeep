@@ -1000,8 +1000,63 @@ surfaces exist, so M7 builds them first.
 | Stage | Scope | Status |
 |---|---|---|
 | M7a | App shell with a shared workspace selection; row menu with download, versions + rollback, rename, move, delete; trash; per-item permissions (list, grant, revoke — files and folders); members, roles and invitations; releasing a flagged file; workspace settings; sign out everywhere; the permission indicator; member-only grants | **Done** (12 Sep 2026) |
-| M7b | Search over name and tags with the five metadata filters; trigram index; tag editor with per-tag limits | Not started |
+| M7b | Search over name and tags with the five metadata filters; trigram index; tag editor with per-tag limits | **Backend done and verified; browser validation blocked** (12 Sep 2026) |
 | M7c | Design pass across every page: scan badge colours corrected to Design §3/§5, file-type icons, table/grid toggle, folder drag-and-drop, the readiness page M0 never eyeballed, anti-slop audit | Not started |
+
+### M7b — search, tags, and one step still unverified
+
+Delivered: `GET /workspaces/{id}/search` and `/tags`; migration 0008 adding `pg_trgm`
+with trigram indexes on `files.name` and `folders.name`; per-tag validation; a search
+page with the five metadata filters as removable chips; a tag editor; and tags on file
+rows, clickable through to a search.
+
+Four decisions, all taken before coding and recorded in PRD §10e:
+
+1. **The typed query matches a name or any tag.** §4.8 first restricted it to names,
+   which would have meant typing "invoice" found nothing for a file named `q3.pdf`
+   tagged `invoice` — while PRD §4 promises "filename/metadata/tag search". The tag
+   *filter* stays exact: the query is the forgiving way in, the filter the precise one.
+2. **Several tag filters mean AND**, because every other control on that page narrows.
+3. **Folders leave the results when a file-only filter is used**, and the page says so.
+   A folder has no type, size or scan status, so one surviving a "flagged only" search
+   would read as a claim about the folder.
+4. **Tags appear on file rows**, not only inside an editor. An invisible tag is one
+   nobody applies, which would have left tag search with an empty field to search.
+
+**The defect writing the test caught.** The query used `lower(name) LIKE …`, which
+returns exactly the right rows and **cannot use a trigram index built on `name`** — it
+had quietly defeated the index migration 0008 exists for. It is now `ILIKE` on the
+column, and the test asserts the planner picks `ix_files_name_trgm`, with the old
+expression included as a contrast proving it does not. The test carries its own evidence.
+
+Two things were checked against the live system rather than assumed: `pg_trgm` is
+available (1.6) and the application role may create it — which is also exactly where a
+managed Postgres that forbids `CREATE EXTENSION` would fail, so M8 inherits that note —
+and the test schema needs the extension for the same reason the real one does; without
+it the entire suite errored at setup with `operator class "gin_trgm_ops" does not exist`.
+
+| Check | Result |
+|---|---|
+| Backend suite | 361 passing (from 328 after M7a), 33 new search tests, 0 skipped, ruff clean |
+| Migration | 0008 upgrade, downgrade, re-upgrade clean; parity test agrees with the models |
+| Frontend | eslint clean, `tsc --noEmit` clean, production build clean across 13 routes |
+| Browser | **Not run** — see below |
+
+**What is not verified, and why.** Mid-way through deploying the frontend container,
+Docker Desktop's engine began returning HTTP 500 on every API call and then crash-looped.
+The cause, from its own logs, is a corrupted containerd metadata store inside the Docker
+VM: `SIGBUS` in `bbolt`'s `Page.FastCheck` while reading an mmap'd page. Restarting Docker
+Desktop, `wsl --shutdown` and `wsl --update` were all tried; none repairs a corrupt bolt
+database, and Docker Desktop itself offers only "Quit" or "Reset to factory defaults".
+The developer chose to recover Docker themselves rather than have the containers, images
+and local volumes reset here.
+
+So the frontend container still runs the pre-M7b image, and the M7b browser script —
+written, covering tags on rows, the query matching a tag, folders dropping out with the
+notice, two tags narrowing, the empty state naming its filters, a result's path and
+download, opening a folder result, the tag editor's refusal wording, and search never
+crossing into another workspace — has not been executed. **M7b is not Done until it
+has.** Nothing in this section claims otherwise, and the M7b commits say the same.
 
 ### M7a — what it delivered, and what it found
 
