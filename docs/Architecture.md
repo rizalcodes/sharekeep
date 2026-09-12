@@ -280,8 +280,16 @@ index added in M1 serves exactly this query.
 PRD §4 scoped search to "filename/metadata/tag" and ruled out document contents. The
 architecture had no section on it at all; this is that section.
 
-**What is searched.** The file name (case-insensitive substring) and tags (exact match on
-the normalised tag). **Metadata**, which the PRD never defined, is defined here as five
+**What is searched.** The typed query matches the file **name or any of its tags**,
+case-insensitively, by substring — decided at M7b, because §4.8 first said the query
+matched only the name, which would have meant typing "invoice" found nothing for a file
+named `q3.pdf` tagged `invoice`, while PRD §4 promises "filename/metadata/tag search".
+The **tag filter** stays exact on the normalised tag, so precise narrowing is still
+possible; the query is the forgiving way in, the filter is the precise one.
+
+**Several tag filters mean AND** (M7b): selecting `invoice` and `2026` returns files
+carrying both. Every other control on that page narrows, and a filter that widened the
+result set as it was added would be the one surprise among them. **Metadata**, which the PRD never defined, is defined here as five
 filters, all combinable with each other and with the text query:
 
 | Filter | Source | Notes |
@@ -295,6 +303,13 @@ filters, all combinable with each other and with the text query:
 Folders match by name too, so a search for "invoices" finds the folder as well as files
 called that. Every result carries its location as a breadcrumb, because a result list that
 does not say *where* each file lives forces the reader to open each one to find out.
+
+**Folders drop out as soon as a file-only filter is used** (M7b). A folder has no type,
+no size and no scan status, so it can neither pass nor fail those filters. Returning it
+anyway would put two different rules in one list without showing which applied to what —
+a folder surviving a "flagged only" search reads as a claim about the folder. The result
+page says that those filters apply to files, rather than leaving the absence to be
+noticed.
 
 **Who sees what.** Search is scoped to the active workspace and requires membership, the
 same dependency every workspace endpoint uses. That is sufficient, and the reason is worth

@@ -300,7 +300,15 @@ M8 stays deployment.
 5. **An owner may lower the workspace quota but not raise it past the platform ceiling.**
    §8's "configurable at the workspace level" stands; a limit the limited party can lift
    at will was not a limit. Found while designing the settings page (Architecture §4.6).
-6. **Deleting a workspace purges its storage prefix in a background task**, which is
+6. **The typed search query matches names and tags**, while the tag filter stays exact
+   (Architecture §4.8, decided at M7b). §4.8 first restricted the query to names, which
+   would have made a tag undiscoverable by typing it.
+7. **Several tag filters mean AND**, because every other control on that page narrows.
+8. **Folders leave the results when a file-only filter is used** — they have no type,
+   size or scan status to judge — and the page says so.
+9. **Tags appear on file rows**, not only inside an editor. An invisible tag is one
+   nobody applies, which would leave "tag search" searching an empty field.
+10. **Deleting a workspace purges its storage prefix in a background task**, which is
    what §8's per-workspace prefix was chosen for. Probed first: Supabase supports
    paginated listing under a prefix but **refuses** S3's batch delete, so cleanup is one
    request per object — a background job, not part of the delete request.

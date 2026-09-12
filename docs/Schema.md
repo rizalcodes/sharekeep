@@ -98,7 +98,7 @@ Represents the current/latest state of a file. Version history is in `file_versi
 | `size_bytes` | bigint | required | Size of the **current** version. Note this is *not* what the file consumes: quota counts every retained version (see §7 and Architecture §6). |
 | `current_version_id` | UUID | **optional** | → `file_versions.id`. Nullable by necessity: `file_versions.file_id` is required, so the file row must exist before its first version row. Set immediately after the first version is created, and non-NULL for every file that has completed an upload. |
 | `scan_status` | enum(`pending`, `scanning`, `clean`, `flagged`, `scan_skipped`, `scan_failed`) | required, default `pending` | Malware scan state of the current version (mirrors `file_versions.scan_status`) |
-| `tags` | text[] | required, default `{}` | Backs the tag half of PRD §4's "filename/metadata/tag search". **Constrained v1.7:** at most 25 per file, each lowercased, trimmed and 1–40 characters of letters, digits, spaces, `-`, `_` or `.`. Before v1.7 only the count was limited, so one tag could be arbitrarily long |
+| `tags` | text[] | required, default `{}` | Backs the tag half of PRD §4's "filename/metadata/tag search". **Constrained v1.7:** at most 25 per file, each lowercased, trimmed and 1–40 characters of letters, digits, spaces, `-`, `_` or `.`. A tag is matched exactly by the tag filter and by substring by the typed query (Architecture §4.8). Before v1.7 only the count was limited, so one tag could be arbitrarily long |
 | `created_by` | UUID | required | → `users.id` |
 | `deleted_at` | datetime | optional | Soft delete |
 | `deletion_batch_id` | UUID | optional | **Added v1.3.** See `folders`. |
