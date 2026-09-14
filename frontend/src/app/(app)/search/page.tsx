@@ -95,7 +95,14 @@ export default function SearchPage() {
       const params = new URLSearchParams(window.location.search);
       const q = params.get("q") ?? "";
       const tag = params.getAll("tag");
-      if (q || tag.length) setFilters((current) => ({ ...current, q, tags: tag }));
+      if (q || tag.length) {
+        setFilters((current) => ({ ...current, q, tags: tag }));
+        // Scrubbed once read, so the address bar cannot disagree with the chips on
+        // screen. Without this, removing a chip left the filter in the URL and a
+        // reload silently brought it back — found by the browser test, where a
+        // reload resurrected a tag filter the run had already cleared.
+        window.history.replaceState(null, "", window.location.pathname);
+      }
     });
     return () => {
       cancelled = true;
