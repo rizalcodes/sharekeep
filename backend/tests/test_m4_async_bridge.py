@@ -92,4 +92,21 @@ def test_asyncio_run_would_have_failed_the_same_way():
         "asyncio.run per task did NOT fail, so this regression test proves nothing "
         f"about the fix.\nstdout:\n{result.stdout}"
     )
-    assert "attached to a different loop" in result.stderr, result.stderr[-800:]
+    # Which symptom appears depends on which operation touches the dead loop first, and
+    # both mean the one thing this control exists to prove — a pooled connection
+    # outliving the loop that opened it:
+    #
+    #   - "attached to a different loop": the second run hands a Future to a loop that
+    #     did not create it (the message M4 originally saw on this machine).
+    #   - a proactor teardown error ("_proactor.send", "Event loop is closed"): on
+    #     Windows, `asyncio.run` had already closed the first loop, so the pooled
+    #     connection's transport has no proactor left to write through. Seen at M7c.
+    #
+    # Pinning only the first message made this control fail while the old code was
+    # breaking exactly as designed — the assertion was narrower than the defect.
+    loop_ownership = (
+        "attached to a different loop",
+        "_proactor.send",
+        "Event loop is closed",
+    )
+    assert any(sign in result.stderr for sign in loop_ownership), result.stderr[-800:]
