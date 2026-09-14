@@ -78,7 +78,9 @@ export default function MembersPage() {
   return (
     <main className="flex flex-1 flex-col">
       <header>
-        <h1 className="font-display text-xl font-semibold tracking-tight text-ink">People</h1>
+        <h1 className="font-display text-xl font-semibold tracking-tight text-ink">
+          Members
+        </h1>
         <p className="mt-0.5 text-sm text-ink-muted">
           Who can reach {workspace.name}, and what they can do in it.
         </p>
@@ -95,7 +97,9 @@ export default function MembersPage() {
 
       <section className="mt-6 rounded-lg border border-border bg-surface">
         <header className="border-b border-border px-4 py-2.5">
-          <h2 className="font-display text-sm font-semibold text-ink">Members</h2>
+          <h2 className="font-display text-sm font-semibold text-ink">
+            Everyone with access
+          </h2>
         </header>
         {!people ? (
           <p className="px-4 py-6 text-sm text-ink-muted">Loading…</p>

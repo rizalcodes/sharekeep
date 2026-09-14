@@ -186,8 +186,8 @@ export default function ActivityPage() {
                 aria-pressed={filter === index}
                 className={`rounded-md px-2.5 py-1.5 text-sm transition-colors ${
                   filter === index
-                    ? "bg-primary text-primary-ink"
-                    : "text-ink-muted hover:bg-surface-sunken"
+                    ? "bg-primary-subtle font-medium text-primary"
+                    : "text-ink-muted hover:bg-surface-sunken hover:text-ink"
                 }`}
               >
                 {option.label}

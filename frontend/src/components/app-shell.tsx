@@ -31,16 +31,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-full flex-1 flex-col">
+      {/* Two deliberate rows (M7c): identity and account above, navigation below.
+          As one wrapping row the nav wrapped inside itself at 1024px — Trash and
+          Settings dropped to a second line while the account menu stayed on the first —
+          so the header looked different depending on how many items a role could see.
+          Two rows look the same at every width and for every role. */}
       <header className="border-b border-border bg-surface">
-        <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center gap-x-6 gap-y-2 px-6 py-3">
+        <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-x-4 gap-y-1 px-6 pt-3">
+          {/* flex-auto, not flex-1: `flex-1` sets flex-basis to 0, so the row never
+              decided it had to wrap and this group overflowed underneath the account
+              menu instead. Basing the wrap on real content width is what makes the
+              address drop to its own line on a phone. */}
+          <div className="flex min-w-0 flex-auto items-center gap-3">
           <Link
             href="/files"
-            className="font-display text-sm font-semibold tracking-tight text-ink"
+            className="shrink-0 font-display text-sm font-semibold tracking-tight text-ink"
           >
             Secure File Sharing
           </Link>
 
-          <label className="flex items-center gap-2 text-sm">
+          <label className="flex min-w-0 flex-1 items-center gap-2 text-sm">
             <span className="sr-only">Workspace</span>
             <select
               value={workspace.id}
@@ -51,7 +61,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 }
                 selectWorkspace(e.target.value);
               }}
-              className="max-w-56 rounded-md border border-border bg-surface px-2 py-1 text-sm text-ink"
+              className="min-w-32 max-w-56 flex-1 rounded-md border border-border bg-surface px-2 py-1 text-sm text-ink"
             >
               {session.workspaces.map((w) => (
                 <option key={w.id} value={w.id}>
@@ -61,10 +71,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               ))}
               <option value="__new__">New workspace…</option>
             </select>
-            <span className="font-mono text-xs text-ink-subtle">{workspace.role}</span>
+            <span className="shrink-0 font-mono text-xs text-ink-subtle">
+              {workspace.role}
+            </span>
           </label>
+          </div>
 
-          <nav aria-label="Primary" className="flex flex-1 flex-wrap items-center gap-1">
+          <AccountMenu email={session.user.email} />
+        </div>
+
+        <div className="mx-auto w-full max-w-5xl px-6 pb-2">
+          {/* Scrolls rather than wraps on a narrow screen: a nav that reflows moves the
+              item someone is reaching for. */}
+          <nav
+            aria-label="Primary"
+            className="flex items-center gap-1 overflow-x-auto pt-1.5"
+          >
             {nav.map((item) => {
               const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
               return (
@@ -83,8 +105,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               );
             })}
           </nav>
-
-          <AccountMenu email={session.user.email} />
         </div>
       </header>
       {/* Keyed by workspace: switching workspace starts each page fresh in the new one
@@ -191,13 +211,13 @@ function AccountMenu({ email }: { email: string }) {
   }
 
   return (
-    <div ref={ref} className="relative">
+    <div ref={ref} className="relative shrink-0">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-haspopup="menu"
-        className="max-w-48 truncate rounded-md px-2.5 py-1.5 text-sm text-ink-muted transition-colors hover:bg-surface-sunken hover:text-ink"
+        className="min-w-0 max-w-48 truncate rounded-md px-2.5 py-1.5 text-sm text-ink-muted transition-colors hover:bg-surface-sunken hover:text-ink"
       >
         {email}
       </button>
