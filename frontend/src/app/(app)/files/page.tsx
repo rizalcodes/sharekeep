@@ -23,6 +23,13 @@ import type {
 } from "@/lib/types";
 import { can, useWorkspace } from "@/lib/workspace-context";
 import {
+  foldersToCreate,
+  readDrop,
+  totalBytes,
+  MAX_FILES,
+  type DropReading,
+} from "@/lib/folder-drop";
+import {
   classify,
   describeFailure,
   matchesInterrupted,
@@ -37,6 +44,7 @@ import { PermissionMark, RowMenu, type RowAction } from "@/components/row-menu";
 import { ScanBadge } from "@/components/scan-badge";
 import { ShareDialog } from "@/components/share-dialog";
 import { UploadQueue } from "@/components/upload-queue";
+import { CATEGORY_LABEL, FileTypeIcon, FolderTypeIcon } from "@/components/file-icon";
 import { TagList, TagsDialog } from "@/components/tags-dialog";
 import { VersionsDialog } from "@/components/versions-dialog";
 
@@ -55,6 +63,10 @@ type Open =
   | null;
 
 type Undo = { batchId: string; kind: "file" | "folder"; name: string };
+
+/** Table or grid (Design.md §5). A preference, so it is remembered per person. */
+type View = "table" | "grid";
+const VIEW_KEY = "fileshare.filesView";
 
 export default function FilesPage() {
   // The shell owns the session and the chosen workspace (M7). This page is re-mounted
@@ -75,6 +87,7 @@ export default function FilesPage() {
   const [items, setItems] = useState<UploadItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [view, setView] = useState<View>("table");
 
   const controllers = useRef(new Map<string, AbortController>());
   const fileInput = useRef<HTMLInputElement>(null);
@@ -83,14 +96,32 @@ export default function FilesPage() {
 
   useEffect(() => {
     let cancelled = false;
+    // Deferred a tick: setting state synchronously in an effect body triggers cascading
+    // renders, and reading `location` or storage during render would not match the
+    // server's first paint.
     void Promise.resolve().then(() => {
       if (cancelled) return;
       const requested = new URLSearchParams(window.location.search).get("folder");
       if (requested) setFolderId(requested);
+      try {
+        const remembered = window.localStorage.getItem(VIEW_KEY);
+        if (remembered === "grid" || remembered === "table") setView(remembered);
+      } catch {
+        // Storage unavailable: the view lasts for this visit only.
+      }
     });
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  const chooseView = useCallback((next: View) => {
+    setView(next);
+    try {
+      window.localStorage.setItem(VIEW_KEY, next);
+    } catch {
+      // Same as above: a preference that cannot be stored is still honoured now.
+    }
   }, []);
 
   const requestSeq = useRef(0);
@@ -181,8 +212,11 @@ export default function FilesPage() {
    * single byte moves (Design.md §5). Discovering this three chunks in is worse.
    */
   const enqueue = useCallback(
-    (files: File[]) => {
+    (files: File[], destination?: string | null) => {
       if (!quota) return;
+      // A dropped folder places its files in the folders it just created, not in the
+      // one the user happened to be looking at.
+      const target = destination === undefined ? folderId : destination;
 
       // Account for what is already queued, or five files that each fit individually
       // could still overflow the workspace together.
@@ -197,7 +231,7 @@ export default function FilesPage() {
           file,
           name: file.name,
           size: file.size,
-          folderId,
+          folderId: target,
           status: "queued",
           progress: 0,
           uploadedBytes: 0,
@@ -240,28 +274,107 @@ export default function FilesPage() {
 
   // --- Drag and drop -------------------------------------------------------
 
+  /**
+   * A dropped folder is uploaded with its structure (Design.md §5, M7c).
+   *
+   * Folders are created top-down and **merge** into an existing folder of the same
+   * name, which is what dropping "Invoices" onto an existing "Invoices" means. A file
+   * whose name already exists becomes a new version, exactly as a single re-upload has
+   * since M2, so nothing is overwritten.
+   */
+  const enqueueTree = useCallback(
+    async (reading: DropReading) => {
+      if (!quota) return;
+      const bytes = totalBytes(reading);
+      if (bytes > quota.storage_available_bytes) {
+        // Checked across the whole tree before anything starts: five files that each
+        // fit can still overflow the workspace together (Design.md §5).
+        setNotice(
+          `That folder needs ${formatBytes(bytes)}, and only ` +
+            `${formatBytes(quota.storage_available_bytes)} is left in this workspace. ` +
+            "Nothing was uploaded.",
+        );
+        return;
+      }
+
+      const resolved = new Map<string, string | null>([["", folderId]]);
+      try {
+        for (const path of foldersToCreate(reading)) {
+          const key = path.join("/");
+          if (resolved.has(key)) continue;
+          const parent = resolved.get(path.slice(0, -1).join("/")) ?? null;
+          const name = path[path.length - 1];
+          try {
+            const created = await folders.create(workspace.id, name, parent);
+            resolved.set(key, created.id);
+          } catch (error) {
+            // 409 means a folder of that name is already here: merge into it. The
+            // server may have cleaned the name, so the match is made against what it
+            // actually stored rather than against the name from the local disk.
+            if (!(error instanceof ApiError) || error.status !== 409) throw error;
+            const siblings = await folders.listing(workspace.id, parent);
+            const existing = siblings.folders.find(
+              (candidate) =>
+                candidate.name.toLowerCase() === name.trim().toLowerCase(),
+            );
+            if (!existing) throw error;
+            resolved.set(key, existing.id);
+          }
+        }
+      } catch (error) {
+        setNotice(
+          error instanceof ApiError
+            ? `Could not recreate the folder structure: ${error.message}`
+            : "Could not recreate the folder structure.",
+        );
+        return;
+      }
+
+      await refresh();
+      for (const item of reading.files) {
+        const destination = resolved.get(item.path.join("/")) ?? folderId;
+        enqueue([item.file], destination);
+      }
+      if (reading.truncated) {
+        setNotice(
+          `That folder holds more than ${MAX_FILES} files, so only the first ` +
+            `${MAX_FILES} were queued. Drop the rest in smaller batches.`,
+        );
+      }
+    },
+    [quota, folderId, workspace.id, enqueue, refresh],
+  );
+
   const onDrop = useCallback(
     (event: React.DragEvent) => {
       event.preventDefault();
       setDragging(false);
       setNotice(null);
 
-      const entries = Array.from(event.dataTransfer.items ?? []);
-      // Folder drop needs recursive traversal and server-side structure creation; it
-      // is deferred to M7. Refusing loudly beats silently uploading nothing.
-      const hasDirectory = entries.some(
-        (entry) => entry.webkitGetAsEntry?.()?.isDirectory,
+      // `dataTransfer.items` is emptied the moment this handler returns, so the entries
+      // are taken now and walked afterwards.
+      const entries = Array.from(event.dataTransfer.items ?? []).map(
+        (item) => item.webkitGetAsEntry?.() ?? null,
       );
-      if (hasDirectory) {
-        setNotice("Folders cannot be dropped yet — drop individual files for now.");
-      }
-
-      const files = Array.from(event.dataTransfer.files ?? []).filter(
+      const plain = Array.from(event.dataTransfer.files ?? []).filter(
         (file) => file.size > 0 || file.type !== "",
       );
-      if (files.length > 0) enqueue(files);
+
+      if (entries.some((entry) => entry?.isDirectory)) {
+        void (async () => {
+          const reading = await readDrop(entries);
+          if (reading.files.length === 0) {
+            setNotice("That folder is empty, so there was nothing to upload.");
+            return;
+          }
+          await enqueueTree(reading);
+        })();
+        return;
+      }
+
+      if (plain.length > 0) enqueue(plain);
     },
-    [enqueue],
+    [enqueue, enqueueTree],
   );
 
   // --- Resume --------------------------------------------------------------
@@ -440,10 +553,10 @@ export default function FilesPage() {
         }`}
       >
         <p className="text-sm font-medium text-ink">
-          Drop files here, or click to choose
+          Drop files or a folder here, or click to choose
         </p>
         <p className="mt-1 text-xs text-ink-muted">
-          Uploaded in chunks straight to storage.
+          Uploaded in chunks straight to storage. A dropped folder keeps its structure.
           {quota && ` Up to ${formatBytes(quota.max_file_size_bytes)} per file.`}
         </p>
       </div>
@@ -513,6 +626,8 @@ export default function FilesPage() {
         listing={listing}
         workspaceRole={workspace.role}
         canAdd={canAdd}
+        view={view}
+        onView={chooseView}
         onOpen={(id) => {
           setUndo(null);
           setFolderId(id);
@@ -599,6 +714,8 @@ function Browser({
   listing,
   workspaceRole,
   canAdd,
+  view,
+  onView,
   onOpen,
   onNewFolder,
   onAction,
@@ -608,6 +725,8 @@ function Browser({
   listing: FolderListing | null;
   workspaceRole: WorkspaceRole;
   canAdd: boolean;
+  view: View;
+  onView: (view: View) => void;
   onOpen: (id: string | null) => void;
   onNewFolder: (name: string) => void;
   onAction: (open: Open) => void;
@@ -708,9 +827,30 @@ function Browser({
     return actions;
   }
 
+  /** The name, as a download button when that is possible and plain text when not. */
+  function fileName(file: FileOut, className: string) {
+    return file.is_downloadable ? (
+      <button
+        type="button"
+        onClick={() => onDownload(file)}
+        title="Download"
+        className={`${className} text-left hover:underline`}
+      >
+        {file.name}
+      </button>
+    ) : (
+      <span
+        className={className}
+        title="This file cannot be downloaded in its current scan state."
+      >
+        {file.name}
+      </span>
+    );
+  }
+
   return (
     <section className="mt-8 rounded-lg border border-border bg-surface">
-      <header className="flex items-center justify-between gap-3 border-b border-border px-4 py-2.5">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-2.5">
         <nav aria-label="Breadcrumb" className="flex min-w-0 items-center gap-1 text-sm">
           <button
             type="button"
@@ -739,41 +879,64 @@ function Browser({
           ))}
         </nav>
 
-        {!canAdd ? null : creating ? (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (name.trim()) onNewFolder(name.trim());
-              setName("");
-              setCreating(false);
-            }}
-            className="flex shrink-0 gap-1"
-          >
-            <input
-              autoFocus
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Folder name"
-              className="w-36 rounded border border-border px-2 py-1 text-sm outline-none focus:border-primary"
-            />
-            <button type="submit" className="rounded px-2 py-1 text-xs text-primary">
-              Create
+        <div className="flex shrink-0 items-center gap-2">
+          {/* Table or grid (Design.md §5). The grid is a density choice, not a gallery:
+              there are no thumbnails, because previews would mean reading file contents
+              this product never reads. */}
+          <div role="group" aria-label="View" className="flex rounded-md border border-border">
+            {(["table", "grid"] as const).map((option) => (
+              <button
+                key={option}
+                type="button"
+                aria-pressed={view === option}
+                onClick={() => onView(option)}
+                className={`px-2 py-1 text-xs capitalize transition-colors first:rounded-l-md last:rounded-r-md ${
+                  view === option
+                    ? "bg-primary-subtle font-medium text-primary"
+                    : "text-ink-muted hover:bg-surface-sunken hover:text-ink"
+                }`}
+              >
+                {option}
+              </button>
+            ))}
+          </div>
+
+          {!canAdd ? null : creating ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (name.trim()) onNewFolder(name.trim());
+                setName("");
+                setCreating(false);
+              }}
+              className="flex shrink-0 gap-1"
+            >
+              <input
+                autoFocus
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Folder name"
+                className="w-36 rounded border border-border px-2 py-1 text-sm outline-none focus:border-primary"
+              />
+              <button type="submit" className="rounded px-2 py-1 text-xs text-primary">
+                Create
+              </button>
+            </form>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setCreating(true)}
+              className="shrink-0 rounded px-2 py-1 text-xs text-ink-muted transition-colors hover:bg-surface-sunken hover:text-ink"
+            >
+              New folder
             </button>
-          </form>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setCreating(true)}
-            className="shrink-0 rounded px-2 py-1 text-xs text-ink-muted transition-colors hover:bg-surface-sunken hover:text-ink"
-          >
-            New folder
-          </button>
-        )}
+          )}
+        </div>
       </header>
 
       {empty ? (
         <p className="px-4 py-8 text-center text-sm text-ink-muted">Nothing here yet.</p>
-      ) : (
+      ) : view === "table" ? (
         <ul className="divide-y divide-border">
           {listing.folders.map((folder) => (
             <li key={folder.id} className="flex items-center gap-3 px-4 py-2">
@@ -782,7 +945,7 @@ function Browser({
                 onClick={() => onOpen(folder.id)}
                 className="flex min-w-0 flex-1 items-center gap-3 rounded py-0.5 text-left"
               >
-                <FolderIcon />
+                <FolderTypeIcon />
                 <span className="truncate text-sm text-ink hover:underline">
                   {folder.name}
                 </span>
@@ -797,24 +960,8 @@ function Browser({
           ))}
           {listing.files.map((file) => (
             <li key={file.id} className="flex items-center gap-3 px-4 py-2">
-              <FileIcon />
-              {file.is_downloadable ? (
-                <button
-                  type="button"
-                  onClick={() => onDownload(file)}
-                  title="Download"
-                  className="min-w-0 flex-1 truncate text-left text-sm text-ink hover:underline"
-                >
-                  {file.name}
-                </button>
-              ) : (
-                <span
-                  className="min-w-0 flex-1 truncate text-sm text-ink"
-                  title="This file cannot be downloaded in its current scan state."
-                >
-                  {file.name}
-                </span>
-              )}
+              <FileTypeIcon category={file.category} />
+              {fileName(file, "min-w-0 flex-1 truncate text-sm text-ink")}
               <TagList tags={file.tags} onSelect={onSearchTag} />
               <PermissionMark
                 myRole={file.my_role}
@@ -835,46 +982,69 @@ function Browser({
             </li>
           ))}
         </ul>
+      ) : (
+        <ul className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
+          {listing.folders.map((folder) => (
+            <li
+              key={folder.id}
+              className="flex flex-col gap-2 rounded-md border border-border p-3"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <FolderTypeIcon />
+                <RowMenu label={folder.name} actions={folderActions(folder)} />
+              </div>
+              <button
+                type="button"
+                onClick={() => onOpen(folder.id)}
+                className="truncate text-left text-sm text-ink hover:underline"
+                title={folder.name}
+              >
+                {folder.name}
+              </button>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-ink-subtle">Folder</span>
+                <PermissionMark
+                  myRole={folder.my_role}
+                  workspaceRole={workspaceRole}
+                  grants={folder.explicit_grants}
+                />
+              </div>
+            </li>
+          ))}
+          {listing.files.map((file) => (
+            <li
+              key={file.id}
+              className="flex flex-col gap-2 rounded-md border border-border p-3"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <FileTypeIcon category={file.category} />
+                <RowMenu label={file.name} actions={fileActions(file)} />
+              </div>
+              {fileName(file, "truncate text-sm text-ink")}
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate font-mono text-xs text-ink-subtle">
+                  {CATEGORY_LABEL[file.category ?? "other"]} · {formatBytes(file.size_bytes)}
+                </span>
+                <PermissionMark
+                  myRole={file.my_role}
+                  workspaceRole={workspaceRole}
+                  shareLinks={file.active_share_links}
+                  grants={file.explicit_grants}
+                />
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <ScanBadge
+                  status={file.scan_status}
+                  reason={file.scan_reason}
+                  overriddenAt={file.scan_override_at}
+                  overrideReason={file.scan_override_reason}
+                />
+                <TagList tags={file.tags} onSelect={onSearchTag} max={2} />
+              </div>
+            </li>
+          ))}
+        </ul>
       )}
     </section>
-  );
-}
-
-function FolderIcon() {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 16 16"
-      fill="none"
-      aria-hidden
-      className="shrink-0 text-ink-subtle"
-    >
-      <path
-        d="M1.5 4.5A1.5 1.5 0 0 1 3 3h3l1.5 1.5H13A1.5 1.5 0 0 1 14.5 6v5.5A1.5 1.5 0 0 1 13 13H3a1.5 1.5 0 0 1-1.5-1.5v-7Z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-      />
-    </svg>
-  );
-}
-
-function FileIcon() {
-  return (
-    <svg
-      width="16"
-      height="16"
-      viewBox="0 0 16 16"
-      fill="none"
-      aria-hidden
-      className="shrink-0 text-ink-subtle"
-    >
-      <path
-        d="M4 2h5l3 3v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-      />
-      <path d="M9 2v3.5h3.5" stroke="currentColor" strokeWidth="1.2" />
-    </svg>
   );
 }

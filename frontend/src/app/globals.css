@@ -28,13 +28,21 @@
   --color-primary-subtle: #eaeff5;
   --color-primary-ink: #ffffff;
 
-  /* Scan / status. Five states, matching Architecture.md §3 exactly. */
+  /* Scan / status. Six states (Architecture.md §3, Design.md §5): clean, scanning,
+     flagged, scan failed, and one neutral shared by queued and not-scanned — both
+     mean nothing has been checked yet, so neither borrows the amber that means work
+     is happening now. */
   --color-status-clean: #157f3d;
   --color-status-clean-subtle: #e8f5ed;
   --color-status-scanning: #b7791f;
   --color-status-scanning-subtle: #fdf4e3;
   --color-status-flagged: #b42318;
   --color-status-flagged-subtle: #fdeceb;
+  /* Scan FAILED, distinct from flagged (Design.md §3, valued at M7c). §3 named an
+     amber-red from M0 and never gave it a value, so this state borrowed flagged red —
+     which made a scan that could not run look like a file the scanner had convicted. */
+  --color-status-failed: #c2410c;
+  --color-status-failed-subtle: #fdeee2;
   --color-status-unscanned: #6b7280;
   --color-status-unscanned-subtle: #f1f2f4;
 
@@ -65,6 +73,8 @@
   --color-status-scanning-subtle: var(--color-status-scanning-subtle);
   --color-status-flagged: var(--color-status-flagged);
   --color-status-flagged-subtle: var(--color-status-flagged-subtle);
+  --color-status-failed: var(--color-status-failed);
+  --color-status-failed-subtle: var(--color-status-failed-subtle);
   --color-status-unscanned: var(--color-status-unscanned);
   --color-status-unscanned-subtle: var(--color-status-unscanned-subtle);
 

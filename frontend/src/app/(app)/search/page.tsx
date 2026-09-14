@@ -6,6 +6,7 @@ import { ApiError, items, members, search } from "@/lib/api";
 import { formatBytes, formatRelative } from "@/lib/format";
 import type { Member, ScanStatus, SearchHit, SearchParams, TagCount } from "@/lib/types";
 import { useWorkspace } from "@/lib/workspace-context";
+import { FileTypeIcon, FolderTypeIcon } from "@/components/file-icon";
 import { ScanBadge } from "@/components/scan-badge";
 import { TagList } from "@/components/tags-dialog";
 
@@ -421,6 +422,7 @@ export default function SearchPage() {
           <ul className="divide-y divide-border">
             {results.map((hit) => (
               <li key={`${hit.kind}-${hit.id}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5">
+                {hit.kind === "folder" ? <FolderTypeIcon /> : <FileTypeIcon category={hit.category} />}
                 <span className="min-w-0 flex-1">
                   {hit.kind === "folder" ? (
                     <button
