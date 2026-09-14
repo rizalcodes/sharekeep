@@ -1269,7 +1269,7 @@ candidate fixes; it is an architecture decision, not a design-pass change.
 | Check | Result |
 |---|---|
 | Backend suite | 361 passing, 0 failed, 0 skipped, ruff clean |
-| Frontend | eslint clean, `tsc --noEmit` clean, production build clean across 14 routes |
+| Frontend | eslint clean, `tsc --noEmit` clean, production build clean across 13 routes |
 | Browser | 38 checks in real Chrome against the live stack, all passing on the final run |
 | Looked at | 6 signed-in pages plus `/status` at 1200px and 390px, and the icon set at 18px and 112px |
 
