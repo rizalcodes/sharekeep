@@ -88,13 +88,51 @@ export async function apiFetch<T>(
 
   const body = await response.json().catch(() => null);
   if (!response.ok) {
-    const detail =
-      body && typeof body === "object" && "detail" in body
-        ? String((body as { detail: unknown }).detail)
-        : response.statusText || "Request failed.";
-    throw new ApiError(detail, response.status);
+    throw new ApiError(readableDetail(body, response), response.status);
   }
   return body as T;
+}
+
+/**
+ * The reason a request was refused, in words a person can read.
+ *
+ * FastAPI sends two shapes. A deliberate refusal — `HTTPException` — has `detail` as a
+ * string, which is the wording the server chose. A validation failure has `detail` as a
+ * LIST of Pydantic errors, and the old code called `String()` on it: every validation
+ * refusal in the product reached the user as "[object Object]". Found at M7b by a
+ * browser test that asked why a rejected tag showed no reason.
+ *
+ * Pydantic prefixes its own messages with "Value error, "; that is noise to a reader, so
+ * it is stripped. The field name is prefixed only when the message does not already name
+ * it, which keeps "At most 25 tags." from becoming "tags: At most 25 tags."
+ */
+function readableDetail(body: unknown, response: Response): string {
+  const fallback = response.statusText || "Request failed.";
+  if (!body || typeof body !== "object" || !("detail" in body)) return fallback;
+
+  const detail = (body as { detail: unknown }).detail;
+  if (typeof detail === "string") return detail;
+  if (!Array.isArray(detail)) return fallback;
+
+  const messages = detail
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return String(entry ?? "");
+      const raw = String((entry as { msg?: unknown }).msg ?? "").replace(
+        /^Value error,\s*/,
+        "",
+      );
+      if (!raw) return "";
+      const loc = (entry as { loc?: unknown }).loc;
+      const field = Array.isArray(loc)
+        ? loc.filter((part) => part !== "body" && typeof part === "string").join(" ")
+        : "";
+      return field && !raw.toLowerCase().includes(field.toLowerCase())
+        ? `${field}: ${raw}`
+        : raw;
+    })
+    .filter(Boolean);
+
+  return messages.length > 0 ? messages.join(" ") : fallback;
 }
 
 // --- Auth -------------------------------------------------------------------

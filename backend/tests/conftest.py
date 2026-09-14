@@ -52,8 +52,34 @@ TEST_DATABASE_URL = os.environ.get(
 )
 
 
+async def _ensure_test_database() -> None:
+    """Create the test database if it is not there.
+
+    It never existed in code: it was created by hand at M1 and simply survived on the
+    dev machine until a Docker volume wipe removed it, at which point all 361 tests
+    errored with `database "fileshare_test" does not exist` — on code that had not
+    changed. A suite that cannot run on a fresh machine is not a suite anyone else can
+    run, so the harness now creates what it needs. `CREATE DATABASE` cannot run inside
+    a transaction, hence AUTOCOMMIT on the maintenance database.
+    """
+    name = TEST_DATABASE_URL.rsplit("/", 1)[-1]
+    server = create_async_engine(
+        TEST_DATABASE_URL.rsplit("/", 1)[0] + "/postgres", isolation_level="AUTOCOMMIT"
+    )
+    try:
+        async with server.connect() as conn:
+            exists = await conn.scalar(
+                text("SELECT 1 FROM pg_database WHERE datname = :name"), {"name": name}
+            )
+            if not exists:
+                await conn.execute(text(f'CREATE DATABASE "{name}"'))
+    finally:
+        await server.dispose()
+
+
 @pytest_asyncio.fixture(loop_scope="session", scope="session")
 async def db_engine():
+    await _ensure_test_database()
     engine = create_async_engine(TEST_DATABASE_URL, poolclass=None)
     # The schema is created from the models rather than by running migrations, so a
     # model/migration divergence cannot hide here. A separate test asserts the
