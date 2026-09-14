@@ -1000,7 +1000,7 @@ surfaces exist, so M7 builds them first.
 | Stage | Scope | Status |
 |---|---|---|
 | M7a | App shell with a shared workspace selection; row menu with download, versions + rollback, rename, move, delete; trash; per-item permissions (list, grant, revoke — files and folders); members, roles and invitations; releasing a flagged file; workspace settings; sign out everywhere; the permission indicator; member-only grants | **Done** (12 Sep 2026) |
-| M7b | Search over name and tags with the five metadata filters; trigram index; tag editor with per-tag limits | **Backend done and verified; browser validation blocked** (12 Sep 2026) |
+| M7b | Search over name and tags with the five metadata filters; trigram index; tag editor with per-tag limits | **Backend verified; 7 of the browser checks passed, 4 still unrun** (14 Sep 2026) |
 | M7c | Design pass across every page: scan badge colours corrected to Design §3/§5, file-type icons, table/grid toggle, folder drag-and-drop, the readiness page M0 never eyeballed, anti-slop audit | Not started |
 
 ### M7b — search, tags, and one step still unverified
@@ -1042,21 +1042,45 @@ it the entire suite errored at setup with `operator class "gin_trgm_ops" does no
 | Frontend | eslint clean, `tsc --noEmit` clean, production build clean across 13 routes |
 | Browser | **Not run** — see below |
 
-**What is not verified, and why.** Mid-way through deploying the frontend container,
-Docker Desktop's engine began returning HTTP 500 on every API call and then crash-looped.
-The cause, from its own logs, is a corrupted containerd metadata store inside the Docker
-VM: `SIGBUS` in `bbolt`'s `Page.FastCheck` while reading an mmap'd page. Restarting Docker
-Desktop, `wsl --shutdown` and `wsl --update` were all tried; none repairs a corrupt bolt
-database, and Docker Desktop itself offers only "Quit" or "Reset to factory defaults".
-The developer chose to recover Docker themselves rather than have the containers, images
-and local volumes reset here.
+**The browser run, and what it reached (14 Sep 2026).** A machine restart brought Docker
+back, the database was intact — revision `0008`, 79 users, 134 workspaces, 61 files, 446
+audit rows, `pg_trgm` and both trigram indexes still in place, so nothing was rebuilt — and
+the frontend was deployed with M7b for the first time. Six of the nine sections of the
+browser script ran before Docker failed again:
 
-So the frontend container still runs the pre-M7b image, and the M7b browser script —
-written, covering tags on rows, the query matching a tag, folders dropping out with the
-notice, two tags narrowing, the empty state naming its filters, a result's path and
-download, opening a folder result, the tag editor's refusal wording, and search never
-crossing into another workspace — has not been executed. **M7b is not Done until it
-has.** Nothing in this section claims otherwise, and the M7b commits say the same.
+| Checked in Chrome | Result |
+|---|---|
+| A tag is shown on a file row, and clicking it opens search already filtered by it | passed |
+| …returning only the tagged files | passed |
+| One query matching a folder by name, a file by name, and two files by tag | passed |
+| A type filter dropping the folder, with the page saying why | passed |
+| Two tags narrowing to the single file carrying both | passed |
+| An empty result naming the query and the tag filters that emptied it | passed |
+| A result carrying its folder path | passed |
+| Downloading from a result, opening a folder result, the tag editor's refusal wording, cross-workspace isolation in the browser | **not run** |
+
+**The harness was wrong before the product was.** The first run reported six failures. All
+six were the script's: it read each row's entire `textContent` and split on a newline, but
+the row renders without block separators, so it compared
+`"q3.binother · M7b … · 3.0 KB · just now2026invoiceNot scanned"` against `"q3.bin"` —
+while the filtering underneath was correct. Its download wait also polled the workspace
+root for a file that lives in a subfolder, so it timed out after three minutes claiming a
+scan had never finished. Both are fixed, and the script now waits for a named set of
+results rather than reading whatever is on screen at the moment it looks.
+
+**One real defect the run did find.** Clicking a tag navigates to `/search?tag=…`, and
+removing that chip left the parameter in the URL — so a reload silently restored a filter
+the user had cleared, and the results were then wrong for a reason nothing on screen
+explained. The page now scrubs the query once read, the same way the invitation page
+scrubs its token fragment.
+
+**Why the remaining checks are still unrun.** Docker Desktop's containerd metadata store
+is corrupt: `SIGBUS` in `bbolt`'s `Page.FastCheck` on an mmap'd page. The machine restart
+did not repair it — it only produced a working window, and the next image build touched
+the damaged page again and took the engine down with it, identical panic. `wsl --shutdown`,
+`wsl --update` and repeated restarts change nothing, because none of them repairs a
+corrupt file; Docker Desktop offers only "Quit" or "Reset to factory defaults". **M7b is
+not Done until the remaining checks run**, and nothing here claims otherwise.
 
 ### M7a — what it delivered, and what it found
 
