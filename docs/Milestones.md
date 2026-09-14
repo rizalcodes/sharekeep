@@ -1000,7 +1000,7 @@ surfaces exist, so M7 builds them first.
 | Stage | Scope | Status |
 |---|---|---|
 | M7a | App shell with a shared workspace selection; row menu with download, versions + rollback, rename, move, delete; trash; per-item permissions (list, grant, revoke — files and folders); members, roles and invitations; releasing a flagged file; workspace settings; sign out everywhere; the permission indicator; member-only grants | **Done** (12 Sep 2026) |
-| M7b | Search over name and tags with the five metadata filters; trigram index; tag editor with per-tag limits | **Backend verified; 7 of the browser checks passed, 4 still unrun** (14 Sep 2026) |
+| M7b | Search over name and tags with the five metadata filters; trigram index; tag editor with per-tag limits | **Done** (14 Sep 2026) |
 | M7c | Design pass across every page: scan badge colours corrected to Design §3/§5, file-type icons, table/grid toggle, folder drag-and-drop, the readiness page M0 never eyeballed, anti-slop audit | Not started |
 
 ### M7b — search, tags, and one step still unverified
@@ -1074,13 +1074,74 @@ the user had cleared, and the results were then wrong for a reason nothing on sc
 explained. The page now scrubs the query once read, the same way the invitation page
 scrubs its token fragment.
 
-**Why the remaining checks are still unrun.** Docker Desktop's containerd metadata store
-is corrupt: `SIGBUS` in `bbolt`'s `Page.FastCheck` on an mmap'd page. The machine restart
-did not repair it — it only produced a working window, and the next image build touched
-the damaged page again and took the engine down with it, identical panic. `wsl --shutdown`,
-`wsl --update` and repeated restarts change nothing, because none of them repairs a
-corrupt file; Docker Desktop offers only "Quit" or "Reset to factory defaults". **M7b is
-not Done until the remaining checks run**, and nothing here claims otherwise.
+**The full browser run, and the root cause of the Docker failures.** All nine sections
+pass — 20 checks in real Chrome against the live stack — including the four that had never
+run: downloading from a search result, opening a folder result, the tag editor's refusal
+wording, and search not crossing into another workspace.
+
+Getting there meant finding out why Docker kept dying, and it was not Docker. **Both host
+drives were completely full**: C: had 0 bytes free of 76 GB, D: 0.1 GB of 42.8 GB. That
+explains every symptom in order — a truncated write corrupting containerd's bbolt store
+(`SIGBUS` on an mmap'd page), the engine crash-looping, `apt-get` failing inside a build
+with "Read-only file system" when WSL's ext4 remounted itself read-only, a truncated image
+blob giving "short read: expected 52629973 bytes but got 15793529", and finally the Docker
+CLI itself dying with `pageAlloc: out of memory` because Windows could not grow a page file
+on a drive with nothing left. A factory reset had been performed and had *not* fixed it,
+because the reset freed 2.6 GB and the disks were still full.
+
+With the developer's approval: a stale 33.6 GB `docker_data.vhdx` from a pre-reset
+configuration was deleted (no WSL distro referenced it any more), Docker's disk image
+location was moved from C: to D: where there is room, and ~5.2 GB of caches and temp files
+were cleared from C:. The migration chain then applied cleanly from `0001` to `0008` on an
+empty database — something only a wipe makes it possible to prove — and the stack came up
+with database, Redis, Celery, storage and scanner all reporting ready.
+
+**Two defects the browser run exposed, neither of them in search.**
+
+*Every validation refusal in the product reached the user as "[object Object]".* FastAPI
+sends two shapes: a deliberate `HTTPException` has a string `detail`, while a Pydantic
+failure sends a **list** of error objects — and the client called `String()` on it. The tag
+editor was refusing `bad/slash` for exactly the right reason and showing the reader nothing
+they could act on. This was not a tag bug: it applied to every field-level refusal in the
+app. The client now reads the list, strips Pydantic's `Value error, ` prefix, and names the
+field only when the message does not already. The refusal now reads "tags: A tag can
+contain letters, digits, spaces, hyphens, underscores and dots".
+
+*The test database was never created by code.* `fileshare_test` was made by hand at M1 and
+survived on this machine until the volume wipe removed it — at which point all 361 tests
+errored with `database "fileshare_test" does not exist`, on code that had not changed. A
+suite that cannot run on a fresh machine is not one anyone else can run, so the harness now
+creates it when missing, for the same reason it creates `pg_trgm`.
+
+**The harness was wrong three times before the product was.** The first run reported six
+failures and the second one more; every one was the script's. It read each row's whole
+`textContent` and split on a newline the markup does not contain, so it compared
+`"q3.binother · M7b … · 3.0 KB · just now2026invoiceNot scanned"` against `"q3.bin"`. It
+polled the workspace root for a file that lives in a subfolder, then blamed a scan for
+never finishing. It waited for a download from a name that renders as plain text until the
+scan resolves, so the click hit nothing. And it asserted on `getByRole("alert")`, which on
+this page matched the document title. Each is recorded because the pattern matters: a
+failing check is a claim about the product that has to be verified like any other.
+
+| Verified | Result |
+|---|---|
+| Backend suite | 361 passing, 0 failures, 0 errors, on a database the harness created itself; ruff clean |
+| Migrations | `0001`…`0008` applied to an empty database; round-trip and parity clean |
+| Frontend | eslint, `tsc --noEmit`, production build clean across 13 routes |
+| Browser | 20 checks across 9 sections, real Chrome, live stack — all passing |
+
+### Open at the end of M7b
+
+- **40 MB across 116 objects sits in the Supabase bucket**, most of it now orphaned: the
+  local database was wiped while the bucket is remote, so no row refers to those bytes any
+  more. Harmless at 40 MB of a 1 GB plan, and `list_prefix` plus the workspace purge task
+  make a sweep straightforward when it matters.
+- **Tag search over a substring scans the workspace's files.** The GIN index on `tags`
+  serves exact membership, which is what the tag *filter* uses; the typed query matches
+  tags with `ILIKE`, which no index covers. Acceptable at this scale, and noted where the
+  query is built.
+- **C: is the drive Docker Desktop itself runs from**, and it sits at ~4 GB free. The data
+  disk now lives on D:, but a long build can still press on C:.
 
 ### M7a — what it delivered, and what it found
 
