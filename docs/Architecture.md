@@ -2,7 +2,7 @@
 
 **Scope note:** system/service design — how components interact, the background job pipeline, security architecture. Not data structure (`Schema.md`) or naming/conventions (`Rules.md`).
 
-**Version:** v1.10 — search, version rollback and the trash specified at the start of M7, 12 September 2026 (see §19). Previously v1.9 (audit-log reading and the notification pipeline, §18). Previously v1.8 (share-link resolution, §17). Previously v1.7 (scan pipeline, §16). Previously v1.6 (frontend build-time configuration, §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
+**Version:** v1.11 — readiness semantics specified during M7c, 15 September 2026 (see §20). Previously v1.10 (search, version rollback and the trash, §19). Previously v1.9 (audit-log reading and the notification pipeline, §18). Previously v1.8 (share-link resolution, §17). Previously v1.7 (scan pipeline, §16). Previously v1.6 (frontend build-time configuration, §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
 
 ---
 
@@ -519,6 +519,14 @@ Reverse proxy / HTTPS: reuse the VPS's existing reverse proxy if one is present 
 
 **Frontend configuration is baked in at build time, not read at runtime.** Next.js inlines every `NEXT_PUBLIC_*` variable into the JavaScript bundle when `next build` runs. `FILESHARE_PUBLIC_API_BASE_URL` is therefore passed to the frontend image as a **build argument** (`build.args`), never as a runtime `environment:` entry — a runtime entry is silently ignored by browser code. Two operational consequences: changing the API origin requires `docker compose build frontend` rather than a restart, and the image must be built with the public HTTPS origin already set, so an image built locally cannot be promoted to the VPS unchanged. Corrected after M3; see §15.
 
+### 7a. Readiness semantics (specified in v1.11, M7c)
+
+`/health/ready` touches Postgres, Redis, Celery and object storage on every request and never reports from cache. Its verdict is `ready` only when all four answer; otherwise `degraded`, returned with **HTTP 503** so a reverse proxy or orchestrator can act on it. `/status` is the signed-out page that renders it (Design.md §5).
+
+The scan budget travels **beside** `checks`, never inside it. A spent free-tier allowance delays scans without making the service unready, and folding it into the verdict would take the whole API out of rotation over a quota that resets at midnight (§3a).
+
+**Open finding for M8 — the Celery check has the flaw the budget was kept out to avoid.** It reports `ok` from `celery_app.control.ping(timeout=2.0)`, which a *healthy but busy* worker does not answer in time: observed at M7c with thirteen scan tasks queued, where the page read `degraded` and the endpoint returned 503 for a worker that was working correctly and reported `ok` moments later. If the VPS's proxy or a monitor health-checks this endpoint, ordinary scanning load can therefore pull the API out of rotation. Three candidate fixes, to be decided at M8 rather than during a design pass: raise the ping timeout, report worker liveness from the worker's own heartbeat (Celery's inspect/ping is not the only source), or report the worker beside `checks` the way the budget is — liveness that matters for serving requests is Postgres and storage, not whether a background worker can reply within two seconds.
+
 ## 8. Object Storage Configuration
 
 **Provider: Supabase Storage via its S3-compatible endpoint** (`https://<project_ref>.storage.supabase.co/storage/v1/s3`), using SigV4 presigning and boto3. A **new, separate Supabase project** — never the one used by `ecommerce-ai-platform` — for the same isolation reason this project does not share credentials with the n8n deployment.
@@ -811,3 +819,7 @@ Five things in *this* document were missing or wrong, and are fixed before any c
    the settings page that offers the button.
 6. **The retention sweep was documented and never built** (§6b). Found while specifying
    the trash, because "whether it can still be restored" depends on it.
+
+## 20. Amendment Log — v1.11 (15 Sep 2026, during M7c): readiness semantics
+
+**§7a added.** The readiness endpoint had never been specified beyond its implementation, and the page rendering it had never been looked at in a browser since M0 — which is how it kept announcing itself as the M0 scaffold through seven milestones, and how the overall verdict it computes went unrendered. M7c specifies what the endpoint means, records that the scan budget is deliberately outside the verdict, and records the open finding that the Celery check reports `degraded` for a healthy-but-busy worker. Nothing about the endpoint's behaviour changed at M7c; the page and the specification changed to match it.

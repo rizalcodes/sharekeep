@@ -32,11 +32,39 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 const V1 = `${API_BASE_URL}/api/v1`;
 
-export type DependencyCheck = { ok: boolean; detail?: string };
+/**
+ * A readiness check reports `ok` plus whatever it knows about itself: the Celery
+ * check adds its worker count, the storage check its provider, bucket and region.
+ * Those extras are optional because each check names only its own.
+ */
+export type DependencyCheck = {
+  ok: boolean;
+  detail?: string;
+  workers?: number;
+  provider?: string;
+  bucket?: string;
+  region?: string;
+};
+
+/**
+ * The scan budget travels *beside* `checks`, not inside it: a spent free-tier quota
+ * delays scans without making the service unready (Architecture.md §3a). Every field
+ * but `enabled` is absent when scanning is switched off.
+ */
+export type ScannerReport = {
+  enabled: boolean;
+  available?: boolean;
+  minute_used?: number;
+  minute_limit?: number;
+  day_used?: number;
+  day_limit?: number;
+  day_remaining?: number;
+};
 
 export type ReadinessResponse = {
   status: "ready" | "degraded";
   checks: Record<string, DependencyCheck>;
+  scanner?: ScannerReport;
 };
 
 export class ApiError extends Error {

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { fetchReadiness, type ReadinessResponse } from "@/lib/api";
+import { fetchReadiness, type DependencyCheck, type ReadinessResponse } from "@/lib/api";
 
 const DEPENDENCY_LABELS: Record<string, string> = {
   database: "PostgreSQL",
@@ -15,7 +15,7 @@ type LoadState =
   | { kind: "loaded"; data: ReadinessResponse }
   | { kind: "unreachable" };
 
-export default function Home() {
+export default function Readiness() {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
 
   const fetchInto = useCallback(async (announceLoading: boolean) => {
@@ -50,21 +50,24 @@ export default function Home() {
   return (
     <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col justify-center px-6 py-16">
       <p className="font-mono text-xs uppercase tracking-widest text-ink-subtle">
-        Milestone M0 · scaffold
+        Operations · readiness
       </p>
       <h1 className="mt-3 font-display text-3xl font-semibold tracking-tight text-ink">
         Secure File Sharing Platform
       </h1>
       <p className="mt-2 max-w-lg text-ink-muted">
-        Backend, worker, and storage wiring. Every dependency below is checked
-        live on each load — nothing here reports from cache.
+        Every dependency below is touched live on each load — nothing here reports
+        from cache, and no sign-in is needed to read it.
       </p>
 
       <section className="mt-10 overflow-hidden rounded-lg border border-border bg-surface">
-        <header className="flex items-center justify-between border-b border-border px-5 py-3">
-          <h2 className="font-display text-sm font-semibold text-ink">
-            Service readiness
-          </h2>
+        <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-3">
+          <div className="flex items-center gap-2.5">
+            <h2 className="font-display text-sm font-semibold text-ink">
+              Service readiness
+            </h2>
+            {state.kind === "loaded" && <Verdict status={state.data.status} />}
+          </div>
           <button
             type="button"
             onClick={load}
@@ -85,22 +88,95 @@ export default function Home() {
         )}
 
         {state.kind === "loaded" && (
-          <ul className="divide-y divide-border">
-            {Object.entries(state.data.checks).map(([key, check]) => (
-              <li
-                key={key}
-                className="flex items-center justify-between gap-4 px-5 py-3"
-              >
-                <span className="text-sm text-ink">
-                  {DEPENDENCY_LABELS[key] ?? key}
-                </span>
-                <StatusBadge ok={check.ok} detail={check.detail} />
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul className="divide-y divide-border">
+              {Object.entries(state.data.checks).map(([key, check]) => (
+                <li
+                  key={key}
+                  className="flex items-center justify-between gap-4 px-5 py-3"
+                >
+                  <span className="min-w-0">
+                    <span className="block text-sm text-ink">
+                      {DEPENDENCY_LABELS[key] ?? key}
+                    </span>
+                    {describe(key, check) && (
+                      <span className="mt-0.5 block truncate font-mono text-xs text-ink-subtle">
+                        {describe(key, check)}
+                      </span>
+                    )}
+                  </span>
+                  <StatusBadge ok={check.ok} detail={check.detail} />
+                </li>
+              ))}
+            </ul>
+            <Scanner scanner={state.data.scanner} />
+          </>
         )}
       </section>
     </main>
+  );
+}
+
+/**
+ * The one fact the API sends that this page used to throw away: whether the service
+ * as a whole is ready. A reader should not have to scan four rows to learn it.
+ */
+function Verdict({ status }: { status: ReadinessResponse["status"] }) {
+  const ready = status === "ready";
+  return (
+    <span
+      className={`rounded-md px-2 py-0.5 font-mono text-xs ${
+        ready
+          ? "bg-status-clean-subtle text-status-clean"
+          : "bg-status-flagged-subtle text-status-flagged"
+      }`}
+    >
+      {status}
+    </span>
+  );
+}
+
+/** What each check reports about itself, beyond ok/not — worker count, bucket, region. */
+function describe(key: string, check: DependencyCheck): string | null {
+  if (key === "celery" && check.workers !== undefined) {
+    return `${check.workers} worker${check.workers === 1 ? "" : "s"} responding`;
+  }
+  if (key === "storage" && check.bucket) {
+    return [check.provider, check.bucket, check.region].filter(Boolean).join(" · ");
+  }
+  return null;
+}
+
+/**
+ * The scan budget, reported below the checks and never as one of them.
+ *
+ * An exhausted free-tier quota is ordinary operation, not a sick service, so the
+ * backend deliberately keeps it out of the readiness verdict (Architecture.md §3a).
+ * Showing it here in neutral type keeps that distinction visible instead of letting
+ * a spent quota read as an outage.
+ */
+function Scanner({ scanner }: { scanner: ReadinessResponse["scanner"] }) {
+  if (!scanner) return null;
+  return (
+    <div className="border-t border-border bg-surface-sunken px-5 py-3">
+      <div className="flex items-baseline justify-between gap-4">
+        <span className="text-sm text-ink">Malware scanning</span>
+        <span className="font-mono text-xs text-ink-muted">
+          {scanner.enabled ? "enabled" : "disabled"}
+        </span>
+      </div>
+      {scanner.enabled && scanner.day_limit !== undefined && (
+        <p className="mt-1 font-mono text-xs text-ink-subtle">
+          {scanner.day_used ?? 0}/{scanner.day_limit} scans used today
+          {scanner.minute_limit !== undefined &&
+            ` · ${scanner.minute_used ?? 0}/${scanner.minute_limit} this minute`}
+          {scanner.available === false && " · rate limit reached, queued files wait"}
+        </p>
+      )}
+      <p className="mt-1 text-xs text-ink-subtle">
+        A spent allowance delays scans; it does not make the service unready.
+      </p>
+    </div>
   );
 }
 
@@ -110,7 +186,7 @@ function StatusBadge({ ok, detail }: { ok: boolean; detail?: string }) {
     : "bg-status-flagged-subtle text-status-flagged";
   return (
     <span
-      className={`rounded-md px-2 py-0.5 font-mono text-xs ${className}`}
+      className={`shrink-0 rounded-md px-2 py-0.5 font-mono text-xs ${className}`}
       title={detail}
     >
       {ok ? "ok" : (detail ?? "unavailable")}
