@@ -12,7 +12,7 @@ has actually been performed, not when the code merely exists (Rules.md §6).
 | M4 | Malware scanning (Celery + VirusTotal) + file versioning | **Done** (10 Sep 2026) |
 | M5 | Sharing: 4 link types, password protection, expiry, modifiers | **Done** (11 Sep 2026) |
 | M6 | Audit log UI + email notifications (Resend) | **Done** (12 Sep 2026) — first marked Done on 11 Sep in error; see the M6 record |
-| M7 | Complete the interface, search + tags, design pass (three stages, PRD §10e) | In progress |
+| M7 | Complete the interface, search + tags, design pass (three stages, PRD §10e) | **Done** (15 Sep 2026) |
 | M8 | Deployment to the shared VPS, end-to-end verification | Not started |
 
 ---
@@ -984,7 +984,7 @@ and the full live M6 run repeated with redirected delivery recorded as before.
 - **After joining, the files page opens on the first workspace, not the new one.** The
   new workspace is in the switcher, and the confirmation page says so.
 
-## M7 — Complete the interface, search, design pass · In progress
+## M7 — Complete the interface, search, design pass · Done
 
 Branch `feature/m7-search-polish`. Split into three stages by decision (PRD §10e), each
 verified and committed on its own, merged together.
@@ -1001,7 +1001,7 @@ surfaces exist, so M7 builds them first.
 |---|---|---|
 | M7a | App shell with a shared workspace selection; row menu with download, versions + rollback, rename, move, delete; trash; per-item permissions (list, grant, revoke — files and folders); members, roles and invitations; releasing a flagged file; workspace settings; sign out everywhere; the permission indicator; member-only grants | **Done** (12 Sep 2026) |
 | M7b | Search over name and tags with the five metadata filters; trigram index; tag editor with per-tag limits | **Done** (14 Sep 2026) |
-| M7c | Design pass across every page: scan badge colours corrected to Design §3/§5, file-type icons, table/grid toggle, folder drag-and-drop, the readiness page M0 never eyeballed, anti-slop audit | Not started |
+| M7c | Design pass across every page: scan badge colours corrected to Design §3/§5, file-type icons, table/grid toggle, folder drag-and-drop, the readiness page M0 never eyeballed, anti-slop audit | **Done** (15 Sep 2026) |
 
 ### M7b — search, tags, and one step still unverified
 
@@ -1197,3 +1197,104 @@ the way a person would.
 
 Architecture v1.10 (§4.1 membership precondition, §4.8 search, §4.9 rollback, §6b trash,
 §19), Schema v1.7, PRD §10e, Design §3 and §5.
+
+### M7c — the design pass, and what only looking could find
+
+All six items delivered. The first four were specified in the docs before any code
+(PRD §10f, Design §3 and §5); the last two were investigations, and both found things.
+
+**Badges.** "Queued" was amber, which Design §3 reserves for work happening *now* — a
+file waiting on the scanner's daily budget is not being scanned, so it is neutral
+alongside "Not scanned". "Scan failed" borrowed flagged red, so a scan that could not run
+looked like a file the scanner had convicted; §3 named an amber-red for it at M0 and never
+gave it a value, and M7c values it (`#C2410C`). The override path is unchanged: a released
+file keeps its own status treatment and never turns green.
+
+**Icons.** One per category, derived server-side from the same mapping the type filter
+uses (Architecture §4.8), so an icon and a filter cannot disagree about what a file is.
+They were then *drawn by looking at them*: at 16px every type collapsed into "a page", and
+the spreadsheet mark read as a crossed-out document, the image as a figure, the audio as a
+blot and the archive's zipper ran into the page's own top edge. Now 18px, with the marks
+redrawn.
+
+**Grid.** A density choice rather than a gallery — there are no thumbnails, because
+previews would mean reading file contents this product never reads. A card carries the same
+facts as a row, and the choice is remembered per person.
+
+**Dropped folders** (deferred from M3). The entry tree is walked, folders are recreated
+top-down, and a name that already exists **merges** instead of being refused or duplicated.
+The whole tree is counted against the quota before the first byte moves. Verified by a
+synthetic `webkitGetAsEntry` tree dispatched as a real drop event, twice — the second drop
+merged, and the server's own 409 on the duplicate folder is in the Postgres log.
+
+### Defects found by running it (M7c)
+
+- **The readiness page had never been opened in a browser since M0.** It worked — four
+  dependencies checked live, all ok — and carried three defects that only looking could
+  find: it announced itself as "MILESTONE M0 · SCAFFOLD"; it threw away the overall
+  ready/degraded verdict the API computes; and it rendered none of what each check reports
+  about itself (worker count, storage provider, bucket, region, scan budget) under a
+  heading promising "every dependency below". Architecture v1.11 §7a now specifies the
+  endpoint, which had only ever existed as its implementation, and Design §5 gained the
+  entry it never had — a surface with no design entry is a surface nobody re-reads, which
+  is how the M0 heading survived seven milestones.
+- **The shell header wrapped inside its own nav** at 1024px, dropping Trash and Settings to
+  a second line while the account menu stayed on the first, so the header looked different
+  depending on how many items a role could see. Two deliberate rows now.
+- **At 390px the brand, workspace switcher and account address overlapped.** Two causes in
+  one row: a `<select>` will not shrink below its widest option unless told it may, and
+  `flex-1` sets the group's basis to 0 so the row never decided it had to wrap.
+- **The grid stayed two columns on a phone**, truncating a card's facts to "Document ·
+  2.0 …" — a card that no longer carries what a row does.
+- **The nav said Members and the page said People**, and the activity filter was the only
+  surface using a filled navy button for "selected" while the shell nav, the view toggle
+  and the search chips all use the subtle fill.
+
+**Left alone deliberately.** The sole owner still sees Remove and an editable role select.
+§5 says an action a role cannot perform should be absent, but this refusal is a state
+invariant rather than a permission — which member is the last owner changes — and the page
+states the rule in prose rather than offering a disabled control with a tooltip nobody
+reads. The M7 reasoning stands; the tension is recorded rather than quietly resolved.
+
+**Open finding for M8.** `/health/ready` reports the Celery worker from
+`control.ping(timeout=2.0)`, which a healthy-but-*busy* worker does not answer: observed
+here with thirteen scan tasks queued, where the page read `degraded` and the endpoint
+returned 503 for a worker that reported `ok` moments later. That is the same flaw the scan
+budget was deliberately kept out of the verdict to avoid, and it matters on the VPS if a
+proxy or monitor health-checks the endpoint. Recorded in Architecture §7a with three
+candidate fixes; it is an architecture decision, not a design-pass change.
+
+### Verification (M7c)
+
+| Check | Result |
+|---|---|
+| Backend suite | 361 passing, 0 failed, 0 skipped, ruff clean |
+| Frontend | eslint clean, `tsc --noEmit` clean, production build clean across 13 routes |
+| Browser | 38 checks in real Chrome against the live stack, all passing on the final run |
+| Looked at | 6 signed-in pages plus `/status` at 1200px and 390px, and the icon set at 18px and 112px |
+
+The browser run reads the colour the browser actually computed rather than the class name,
+because a class pointing at a token nobody defined would still look wrong on screen — and
+that was exactly the M0 defect this milestone fixed.
+
+**Five failures in the browser runs were the harness's fault, not the product's**, and each
+is worth keeping: forcing scan statuses in the database *while the scan pipeline was still
+writing*, so the worker's verdict landed after the UPDATE; `` in a Python heredoc
+becoming a literal backspace byte, leaving two regexes that could never match; reading
+`/status` while it still said "Checking…" (where "storage" passed only because the word
+appears in the intro prose); asserting a dropped folder's files existed while they were
+still uploading; and asserting `ready` immediately after queueing thirteen scans, which is
+what surfaced the M8 finding above.
+
+### Docs amended first
+
+PRD §10f (the six M7c decisions), Design §3 (the amber-red valued) and §5 (icons, grid,
+dropped folders, the readiness page), Architecture v1.11 (§7a readiness semantics, §20).
+
+### Manual pass (15 Sep 2026)
+
+Confirmed in the browser by the project owner: `/status` reads correctly and no longer
+claims to be M0, with the verdict and the per-check detail both visible; the table/grid
+toggle works; a dropped folder uploads with its structure; download works; the file icons
+differ per type; and the layout at ~400px is tidy with nothing overlapping. M7 closed on
+that basis — all three stages verified, not just built.

@@ -69,6 +69,11 @@ export type FileOut = {
   my_role?: WorkspaceRole | null;
   active_share_links?: number;
   explicit_grants?: number;
+  /**
+   * The file-type category, resolved server-side from the same mapping the type filter
+   * uses (M7c). The browser never derives it: one table, one place.
+   */
+  category?: FileCategory;
 };
 
 export type FolderListing = {

@@ -337,6 +337,29 @@ it: `CopyObject` produced a byte-identical object (SHA-256 compared) with its co
 preserved, and `UploadPartCopy` works for the multipart case. The bytes of a rollback
 therefore never pass through our servers.
 
+## 10f. M7c Design Pass Decisions (15 Sep 2026, start of M7c)
+
+1. **Scan failed gets its own colour** (`#C2410C`, amber-red). §3 has named the colour
+   since M0 without ever valuing it, so the implementation borrowed flagged red and a
+   scan that failed to *run* looked exactly like a file the scanner had *convicted*. For
+   a product whose whole claim is honest scan state, that was the worst of the six badges
+   to get wrong.
+2. **"Queued" becomes neutral**, as §5 always said. §3's own line had contradicted it
+   ("Amber (scanning/pending)") and the implementation followed §3. Queued and "not
+   scanned" therefore share the neutral treatment and differ by label and tooltip, which
+   is deliberate: both mean "nothing has been checked yet", and neither should borrow the
+   amber that means work is happening right now.
+3. **File icons reuse the search categories**, resolved server-side. The alternative —
+   deriving a category in the browser from `mime_type` — would put the same mapping in two
+   places, and the one in the browser would be the one that drifts.
+4. **A dropped folder is uploaded with its structure, merging into an existing folder of
+   the same name.** Decided by the developer over refusing the drop or creating a numbered
+   twin. Files whose names collide become new versions, which is M2's behaviour for a
+   re-upload and needs no new rule.
+5. **The grid view carries the same facts as a table row, at a smaller size.** There are
+   no thumbnails and there will not be: generating previews means reading file contents,
+   which this product deliberately never does.
+
 ## 11. Next Steps
 
 1. ~~Draft `Schema.md`, `Rules.md`, `Architecture.md`, and `Design.md`.~~ Done.

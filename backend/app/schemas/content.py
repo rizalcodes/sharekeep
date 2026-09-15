@@ -6,7 +6,7 @@ import re
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, computed_field, field_validator
 
 from app.models.enums import ScanStatus, ShareLinkType, WorkspaceRole
 
@@ -111,6 +111,20 @@ class FileOut(BaseModel):
     my_role: WorkspaceRole | None = None
     active_share_links: int = 0
     explicit_grants: int = 0
+
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def category(self) -> str:
+        """The file-type category, for its icon and the type filter (Design.md §5, M7c).
+
+        Derived from the one mapping in `services.search`, server-side. Deriving it in
+        the browser instead would put the same table in two places, and the copy in the
+        browser is the one that would drift.
+        """
+        from app.services.search import category_of
+
+        return category_of(self.mime_type)
 
 
 class FileUpdate(BaseModel):

@@ -29,7 +29,10 @@ const PRESENTATION: Record<ScanStatus, Presentation> = {
   },
   pending: {
     label: "Queued",
-    className: "bg-status-scanning-subtle text-status-scanning",
+    // Neutral, not amber (Design.md §5). Amber means the scanner is working on it right
+    // now; queued means nothing has happened yet. §3's own line said "pending" was amber
+    // and this followed it until M7c.
+    className: "bg-status-unscanned-subtle text-status-unscanned",
     title:
       "Waiting for scanner capacity, not being scanned yet. The scanner allows a " +
       "limited number of checks per day, so this can wait a while. It cannot be " +
@@ -49,7 +52,9 @@ const PRESENTATION: Record<ScanStatus, Presentation> = {
   },
   scan_failed: {
     label: "Scan failed",
-    className: "bg-status-flagged-subtle text-status-flagged",
+    // Its own colour, not flagged red (Design.md §3, M7c): a scan that could not run is
+    // not a conviction, and sharing red with "Flagged" made the two indistinguishable.
+    className: "bg-status-failed-subtle text-status-failed",
     title: "The scan could not complete. Downloads stay blocked until it succeeds.",
   },
 };
