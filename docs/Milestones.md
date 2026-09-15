@@ -12,7 +12,7 @@ has actually been performed, not when the code merely exists (Rules.md §6).
 | M4 | Malware scanning (Celery + VirusTotal) + file versioning | **Done** (10 Sep 2026) |
 | M5 | Sharing: 4 link types, password protection, expiry, modifiers | **Done** (11 Sep 2026) |
 | M6 | Audit log UI + email notifications (Resend) | **Done** (12 Sep 2026) — first marked Done on 11 Sep in error; see the M6 record |
-| M7 | Complete the interface, search + tags, design pass (three stages, PRD §10e) | In progress |
+| M7 | Complete the interface, search + tags, design pass (three stages, PRD §10e) | **Done** (15 Sep 2026) |
 | M8 | Deployment to the shared VPS, end-to-end verification | Not started |
 
 ---
@@ -984,7 +984,7 @@ and the full live M6 run repeated with redirected delivery recorded as before.
 - **After joining, the files page opens on the first workspace, not the new one.** The
   new workspace is in the switcher, and the confirmation page says so.
 
-## M7 — Complete the interface, search, design pass · In progress
+## M7 — Complete the interface, search, design pass · Done
 
 Branch `feature/m7-search-polish`. Split into three stages by decision (PRD §10e), each
 verified and committed on its own, merged together.
@@ -1290,3 +1290,11 @@ what surfaced the M8 finding above.
 
 PRD §10f (the six M7c decisions), Design §3 (the amber-red valued) and §5 (icons, grid,
 dropped folders, the readiness page), Architecture v1.11 (§7a readiness semantics, §20).
+
+### Manual pass (15 Sep 2026)
+
+Confirmed in the browser by the project owner: `/status` reads correctly and no longer
+claims to be M0, with the verdict and the per-check detail both visible; the table/grid
+toggle works; a dropped folder uploads with its structure; download works; the file icons
+differ per type; and the layout at ~400px is tidy with nothing overlapping. M7 closed on
+that basis — all three stages verified, not just built.
