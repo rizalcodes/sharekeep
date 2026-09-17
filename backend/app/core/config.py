@@ -8,7 +8,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # VirusTotal submission ceilings (Architecture.md §3). Defaults reflect the public API
@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     # JWTs ride in httpOnly cookies (Architecture.md §9), never localStorage.
     cookie_secure: bool = True
     cookie_domain: str | None = None
+
+    # --- Proxies (Architecture.md §4.4, M8) ---
+    # How many reverse proxies stand between the internet and this process. The client
+    # address is read that many entries from the RIGHT of X-Forwarded-For, because each
+    # proxy appends what it saw and everything to the left of that was written by the
+    # client. 0 ignores the header entirely. Until M8 the leftmost entry was used, which
+    # let any visitor choose their own address: a new one per request walked straight
+    # through every per-IP limit.
+    trusted_proxy_hops: int = Field(default=0, ge=0, le=5)
 
     # --- Frontend / CORS ---
     frontend_origin: str = "http://localhost:3000"

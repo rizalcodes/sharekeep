@@ -9,29 +9,52 @@ Append-only: this module offers no update or delete.
 
 from __future__ import annotations
 
+import ipaddress
 import uuid
 from typing import Any
 
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.enums import AuditAction, AuditTargetType
 from app.models.identity import AuditLog
 
 
 def client_ip(request: Request | None) -> str | None:
-    """Best-effort client IP.
+    """The client's address, as far as the proxies we actually trust can vouch for it.
 
-    Behind the VPS reverse proxy the peer address is the proxy, so X-Forwarded-For is
-    consulted first. Only meaningful because the proxy is trusted and sets it — this
-    header is attacker-controlled when it is not.
+    Each reverse proxy APPENDS the address it received the request from to
+    X-Forwarded-For; it does not replace what the client sent. So with N trusted proxies
+    in front of us the client is the Nth entry from the right, and every entry to the
+    left of it is text the client chose. Until M8 this took the leftmost entry: a
+    different made-up address per request made 80 share-token attempts with no refusal,
+    and let a visitor write any IP they liked into the audit log (Architecture §4.4).
+
+    With `trusted_proxy_hops = 0` (development, tests) the header is ignored and the TCP
+    peer is the answer. An entry that is not an IP address is ignored as well: the audit
+    column is INET, and a malformed header must not be able to break the write.
     """
     if request is None:
         return None
+    peer = request.client.host if request.client else None
+    hops = settings.trusted_proxy_hops
+    if hops <= 0:
+        return peer
+
     forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip() or None
-    return request.client.host if request.client else None
+    entries = [entry.strip() for entry in forwarded.split(",")] if forwarded else []
+    entries = [entry for entry in entries if entry]
+    if not entries:
+        return peer
+    # Fewer entries than trusted hops means the request skipped an outer proxy; every
+    # entry present was still appended by a proxy we trust, so the furthest one is the
+    # best observation we have.
+    candidate = entries[-hops] if len(entries) >= hops else entries[0]
+    try:
+        return str(ipaddress.ip_address(candidate))
+    except ValueError:
+        return peer
 
 
 def user_agent(request: Request | None) -> str | None:
