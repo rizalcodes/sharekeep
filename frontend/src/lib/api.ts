@@ -61,9 +61,22 @@ export type ScannerReport = {
   day_remaining?: number;
 };
 
+/**
+ * The Celery worker, reported beside the verdict from its own heartbeat (Architecture.md
+ * §7a, M8). `alive` is null when the heartbeat could not be read at all, which is not the
+ * same claim as the worker being gone.
+ */
+export type WorkerReport = {
+  alive: boolean | null;
+  workers?: number;
+  last_seen_seconds?: number;
+  detail?: string;
+};
+
 export type ReadinessResponse = {
   status: "ready" | "degraded";
   checks: Record<string, DependencyCheck>;
+  worker?: WorkerReport;
   scanner?: ScannerReport;
 };
 

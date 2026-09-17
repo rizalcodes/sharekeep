@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import worker_heartbeat
 from app.core.config import settings
 from app.core.database import get_db
 from app.services import storage, vt_budget
@@ -49,38 +50,24 @@ async def _check_redis() -> dict[str, Any]:
     return {"ok": True}
 
 
-async def _check_celery() -> dict[str, Any]:
-    """Ask the broker whether any worker answers a ping."""
-    from app.core.celery_app import celery_app
-
-    def _ping() -> list[dict[str, Any]] | None:
-        return celery_app.control.ping(timeout=2.0)
-
-    try:
-        replies = await asyncio.to_thread(_ping)
-    except Exception as exc:
-        return {"ok": False, "detail": type(exc).__name__}
-    if not replies:
-        return {"ok": False, "detail": "no workers responded"}
-    return {"ok": True, "workers": len(replies)}
-
-
 async def _check_storage() -> dict[str, Any]:
     return await asyncio.to_thread(storage.check_connectivity)
 
 
 @router.get("/health/ready")
 async def readiness(response: Response, db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
-    database, redis_status, celery_status, storage_status = await asyncio.gather(
+    database, redis_status, storage_status = await asyncio.gather(
         _check_database(db),
         _check_redis(),
-        _check_celery(),
         _check_storage(),
     )
+    # What serving a request needs (Architecture.md §7a, M8). The Celery worker is not in
+    # here: M7c showed a broadcast ping going unanswered by a healthy worker that was busy,
+    # and a busy worker must not take the API out of rotation — uploads and downloads keep
+    # working while scans wait. It is reported beside the verdict instead, below.
     checks = {
         "database": database,
         "redis": redis_status,
-        "celery": celery_status,
         "storage": storage_status,
     }
     all_ok = all(check["ok"] for check in checks.values())
@@ -95,8 +82,15 @@ async def readiness(response: Response, db: AsyncSession = Depends(get_db)) -> d
     if settings.scanning_enabled:
         scanner.update(await vt_budget.usage())
 
+    heartbeat_client = aioredis.from_url(settings.redis_url, socket_connect_timeout=2)
+    try:
+        worker = await worker_heartbeat.report(heartbeat_client)
+    finally:
+        await heartbeat_client.aclose()
+
     return {
         "status": "ready" if all_ok else "degraded",
         "checks": checks,
+        "worker": worker,
         "scanner": scanner,
     }
