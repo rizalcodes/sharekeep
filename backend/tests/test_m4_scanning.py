@@ -220,14 +220,14 @@ async def test_the_download_works_only_after_the_override(make_client, db):
     client, ws = await _workspace(make_client, "m4-dl@example.com")
     file, version = await _flagged_file(client, ws, db)
 
-    before = await client.get(f"{WS}/{ws}/files/{file.id}/download")
+    before = await client.post(f"{WS}/{ws}/files/{file.id}/download")
     assert before.status_code == 403
 
     await client.post(
         f"{WS}/{ws}/files/{file.id}/versions/{version.id}/scan-override",
         json={"reason": "Signed off by the security reviewer."},
     )
-    after = await client.get(f"{WS}/{ws}/files/{file.id}/download")
+    after = await client.post(f"{WS}/{ws}/files/{file.id}/download")
     assert after.status_code == 200
 
 
@@ -467,7 +467,7 @@ async def test_with_scanning_on_an_upload_is_pending_and_withheld(make_client, m
     assert body["scan_status"] == ScanStatus.PENDING.value
     assert body["is_downloadable"] is False
 
-    refused = await client.get(f"{WS}/{ws}/files/{body['id']}/download")
+    refused = await client.post(f"{WS}/{ws}/files/{body['id']}/download")
     assert refused.status_code == 403
     assert "queued" in refused.json()["detail"].lower()
 
@@ -479,4 +479,4 @@ async def test_with_scanning_off_an_upload_is_downloadable_at_once(make_client):
 
     assert body["scan_status"] == ScanStatus.SCAN_SKIPPED.value
     assert body["is_downloadable"] is True
-    assert (await client.get(f"{WS}/{ws}/files/{body['id']}/download")).status_code == 200
+    assert (await client.post(f"{WS}/{ws}/files/{body['id']}/download")).status_code == 200

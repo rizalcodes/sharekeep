@@ -397,6 +397,8 @@ export const items = {
       `/workspaces/${workspaceId}/files/${fileId}/download${
         versionId ? `?version_id=${encodeURIComponent(versionId)}` : ""
       }`,
+      // POST: issuing the URL is audited, so it must sit behind the CSRF check.
+      { method: "POST" },
     ),
   versions: (workspaceId: string, fileId: string) =>
     apiFetch<VersionOut[]>(`/workspaces/${workspaceId}/files/${fileId}/versions`),

@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import httpx
 import pytest
+from sqlalchemy import func, select
 
 from app.core import csrf
 from app.core.config import settings
 from app.core.database import get_db
 from app.main import app
-from tests.conftest import DEFAULT_PASSWORD
+from app.models.enums import AuditAction
+from app.models.identity import AuditLog
+from tests.conftest import DEFAULT_PASSWORD, new_user, upload_file
 
 
 @pytest.fixture
@@ -161,3 +164,27 @@ def test_the_host_prefix_is_used_whenever_the_browser_would_honour_it(monkeypatc
 
 def test_the_health_check_is_not_under_the_guard():
     assert not "/health/ready".startswith(settings.api_v1_prefix)
+
+
+async def test_issuing_a_download_url_is_not_reachable_by_get(make_client, db):
+    """A cross-site top-level GET still carries a Lax cookie. As a GET, any page could
+    make a signed-in visitor's browser write a "downloaded" entry in their name."""
+    owner, session = await new_user(make_client, "csrf-download@example.com")
+    ws = session["workspaces"][0]["id"]
+    file_id = (await upload_file(owner, ws, "report.txt")).json()["id"]
+
+    async def downloads() -> int:
+        return await db.scalar(
+            select(func.count())
+            .select_from(AuditLog)
+            .where(AuditLog.action == AuditAction.DOWNLOAD)
+        )
+
+    before = await downloads()
+    forged = await owner.get(f"/api/v1/workspaces/{ws}/files/{file_id}/download")
+    assert forged.status_code == 405
+    assert await downloads() == before
+
+    real = await owner.post(f"/api/v1/workspaces/{ws}/files/{file_id}/download")
+    assert real.status_code == 200, real.text
+    assert await downloads() == before + 1
