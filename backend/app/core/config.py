@@ -273,6 +273,47 @@ class Settings(BaseSettings):
             missing.append("FILESHARE_JWT_SECRET")
         return missing
 
+    def production_configuration_errors(self) -> list[str]:
+        """Settings that are present but wrong for production (M8).
+
+        Each of these starts cleanly and fails quietly later, which is why they are refused
+        at boot rather than discovered by a user: every emailed link pointing at the
+        recipient's own machine, every visitor sharing the proxy's single rate-limit
+        bucket, mail silently redirected to the developer.
+        """
+        errors: list[str] = []
+        origin = urlparse(self.frontend_origin)
+        if origin.scheme != "https" or origin.hostname in {"localhost", "127.0.0.1", "::1"}:
+            errors.append(
+                "FILESHARE_FRONTEND_ORIGIN must be the public https origin; every emailed "
+                "link and the CORS allowance are built from it"
+            )
+        if not self.cookie_secure:
+            errors.append("FILESHARE_COOKIE_SECURE must be true")
+        if self.cookie_domain:
+            errors.append(
+                "FILESHARE_COOKIE_DOMAIN must be unset: auth cookies stay host-only on the "
+                "API host, and the CSRF cookie cannot use its __Host- prefix with a domain"
+            )
+        if self.trusted_proxy_hops < 1:
+            errors.append(
+                "FILESHARE_TRUSTED_PROXY_HOPS must be at least 1 behind the reverse proxy; "
+                "at 0 every visitor has the proxy's address and shares one rate limit"
+            )
+        if self.notification_redirect_to:
+            errors.append(
+                "FILESHARE_NOTIFICATION_REDIRECT_TO must be unset: it sends every "
+                "notification to one address"
+            )
+        if self.resend_from_email.endswith("@resend.dev"):
+            errors.append(
+                "FILESHARE_RESEND_FROM_EMAIL must be on the verified sending domain, not "
+                "Resend's sandbox sender"
+            )
+        if len(self.jwt_secret.get_secret_value().encode()) < 32:
+            errors.append("FILESHARE_JWT_SECRET must be at least 32 bytes")
+        return errors
+
 
 def _swap_redis_db(url: str, db_index: int) -> str:
     """Return `url` pointed at a different Redis logical database."""

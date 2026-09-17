@@ -39,6 +39,11 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(
                 "refusing to start in production without: " + ", ".join(sorted(missing))
             )
+        errors = settings.production_configuration_errors()
+        if errors:
+            raise RuntimeError(
+                "refusing to start in production with: " + " | ".join(errors)
+            )
     yield
     await engine.dispose()
     logger.info("fileshare API shut down")
