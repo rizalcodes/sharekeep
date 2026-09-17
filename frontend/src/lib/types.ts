@@ -27,6 +27,8 @@ export type Session = {
   user: User;
   workspaces: WorkspaceSummary[];
   access_token_expires_at: string | null;
+  /** Rotated at sign-in and sign-up; absent from /me, which does not rotate it. */
+  csrf_token?: string | null;
 };
 
 export type FolderOut = {

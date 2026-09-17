@@ -59,6 +59,10 @@ class WorkspaceSummary(BaseModel):
     role: WorkspaceRole
 
 
+class CsrfOut(BaseModel):
+    csrf_token: str
+
+
 class SessionOut(BaseModel):
     """Returned on signup/login/refresh. Tokens are NOT in the body — they are set as
     httpOnly cookies, so a script can never read them (Architecture.md §9)."""
@@ -67,3 +71,8 @@ class SessionOut(BaseModel):
     workspaces: list[WorkspaceSummary]
     # None on /me when the access cookie is unreadable; set on signup/login/refresh.
     access_token_expires_at: datetime | None = None
+    # The CSRF token for this session (Architecture.md §4.0, M8). Unlike the auth tokens
+    # it is MEANT to be read by the page: its whole job is to be copied into a header by
+    # a script that can read our responses, which a cross-site page cannot. None on /me,
+    # which does not rotate it.
+    csrf_token: str | None = None

@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 
-from app.core import rate_limit, security
+from app.core import csrf, rate_limit, security
 from app.core.config import settings
 from app.core.dependencies import CurrentUser, DbSession
 from app.models.enums import AuditAction, AuditTargetType
-from app.schemas.auth import LoginRequest, SessionOut, SignupRequest, UserOut, WorkspaceSummary
+from app.schemas.auth import (
+    CsrfOut,
+    LoginRequest,
+    SessionOut,
+    SignupRequest,
+    UserOut,
+    WorkspaceSummary,
+)
 from app.services import audit, auth, invitations
 
 router = APIRouter(prefix=f"{settings.api_v1_prefix}/auth", tags=["auth"])
@@ -110,6 +117,8 @@ async def signup(
     await db.commit()
 
     security.set_auth_cookies(response, access_token, refresh_token)
+    # A new identity gets a new token: one obtained before signing in is worthless after.
+    session.csrf_token = csrf.rotate(response)
     return session
 
 
@@ -165,6 +174,7 @@ async def login(
     await db.commit()
 
     security.set_auth_cookies(response, access_token, refresh_token)
+    session.csrf_token = csrf.rotate(response)
     return session
 
 
@@ -188,6 +198,9 @@ async def refresh(request: Request, response: Response, db: DbSession) -> Sessio
     await db.commit()
 
     security.set_auth_cookies(response, access_token, new_refresh)
+    # Same person, same token: rotating here would break a request another part of the
+    # page sent with the token it already had.
+    session.csrf_token = csrf.current_or_new(request, response)
     return session
 
 
@@ -220,6 +233,7 @@ async def logout(request: Request, response: Response, db: DbSession) -> Respons
     await db.commit()
 
     security.clear_auth_cookies(response)
+    csrf.rotate(response)
     response.status_code = status.HTTP_204_NO_CONTENT
     return response
 
@@ -242,8 +256,20 @@ async def logout_all(
     await db.commit()
 
     security.clear_auth_cookies(response)
+    csrf.rotate(response)
     response.status_code = status.HTTP_204_NO_CONTENT
     return response
+
+
+@router.get("/csrf", response_model=CsrfOut)
+async def csrf_token(request: Request, response: Response) -> CsrfOut:
+    """The CSRF token for this browser, issuing one if it has none.
+
+    Needs no session, because sign-in and sign-up are protected too (login CSRF). Safe as
+    a GET: it changes nothing an attacker can use, and CORS keeps any other origin from
+    reading the value it returns.
+    """
+    return CsrfOut(csrf_token=csrf.current_or_new(request, response))
 
 
 @router.get("/me", response_model=SessionOut)
