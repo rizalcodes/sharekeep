@@ -12,6 +12,9 @@ COPY . .
 # NEXT_PUBLIC_* is inlined at build time, so the API base URL must be present here.
 ARG NEXT_PUBLIC_API_BASE_URL=http://localhost:8000
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+# Named in the CSP connect-src, because parts are uploaded browser-direct to storage.
+ARG NEXT_PUBLIC_STORAGE_ORIGIN=
+ENV NEXT_PUBLIC_STORAGE_ORIGIN=$NEXT_PUBLIC_STORAGE_ORIGIN
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 
