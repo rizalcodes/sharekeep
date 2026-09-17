@@ -360,6 +360,51 @@ therefore never pass through our servers.
    no thumbnails and there will not be: generating previews means reading file contents,
    which this product deliberately never does.
 
+## 10g. M8 Deployment Decisions (17 Sep 2026, start of M8)
+
+Domain bought: **sharekeep.xyz** (Porkbun, auto-renew off). Eight decisions, the last four
+closing gaps no document had addressed.
+
+1. **Frontend at the apex, API at `api.sharekeep.xyz`**, `www` redirecting to the apex.
+   Share and invitation links are the product's public face, so the shortest host belongs
+   there; one registrable domain keeps `SameSite=Lax` cookies working (Architecture §4.0);
+   and a cross-origin frontend/API pair is the topology every milestone since M0 has
+   actually exercised (`localhost:3000` to `:8000`). Single-origin path routing was
+   rejected as a topology nothing had tested.
+2. **CSRF: a session-bound token delivered in the response body**, held in memory by the
+   frontend and sent as `X-CSRF-Token`, compared against an httpOnly cookie. No cookie is
+   readable by JavaScript on any subdomain, it works with host-only cookies across the two
+   hosts, and a pre-session token covers sign-in and sign-up (login CSRF). Rejected: a
+   `Domain=sharekeep.xyz` readable cookie (widens a cookie to every future subdomain) and a
+   custom-header-only check (not what §10e decided, and silently removed by one CORS
+   mistake).
+3. **Readiness answers only for what serving a request needs**; the Celery worker is
+   reported beside the verdict from a heartbeat written by its own process. Closes the M7c
+   finding (Architecture §7a).
+4. **Deployment is run by the developer, prepared and verified by Claude.** Every VPS step
+   is a checked script in the repository; the developer runs it over SSH; everything
+   observable from outside (HTTPS, headers, cookies, CORS, a real browser) is verified
+   independently. A docker-group account for the agent was rejected because it is root on a
+   VPS that also holds the n8n project: a separate username, not isolation.
+5. **Sign-up is invite-only in production**: an address on `FILESHARE_SIGNUP_ALLOWLIST`, or
+   anyone holding a valid invitation. Public share links still open for anyone. Every
+   account draws on one free tier (1 GB storage, 500 scans/day, Resend's daily send limit),
+   so open sign-up would let one stranger fill the bucket and turn a file host with public
+   links into an abuse vector sending mail as sharekeep.xyz.
+6. **Production files live in their own bucket** in the existing Supabase project. The 90
+   orphaned objects found at the end of M7 are the argument: they are objects the *local*
+   database does not know, and any cleanup run from a local stack sharing the bucket would
+   classify every production object the same way and delete it. Accepted weakness: S3 keys
+   are project-wide, and every bucket shares the 1 GB limit.
+7. **Mail is sent from a verified sending subdomain**, `mail.sharekeep.xyz`, with the
+   development redirect switched off in production. Without a verified domain an invitation
+   reaches only the account owner, and M8's end-to-end verification could not include a
+   second person. A subdomain keeps sending reputation apart from the apex.
+8. **Nightly database backups, with a restore that is actually performed.** Seven days kept
+   on the VPS, the newest copied off it, and a restore drill into an empty database is part
+   of M8's verification. The stake was demonstrated locally at M7: losing the database
+   leaves every stored object unreachable.
+
 ## 11. Next Steps
 
 1. ~~Draft `Schema.md`, `Rules.md`, `Architecture.md`, and `Design.md`.~~ Done.

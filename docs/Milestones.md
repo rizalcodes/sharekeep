@@ -13,7 +13,7 @@ has actually been performed, not when the code merely exists (Rules.md §6).
 | M5 | Sharing: 4 link types, password protection, expiry, modifiers | **Done** (11 Sep 2026) |
 | M6 | Audit log UI + email notifications (Resend) | **Done** (12 Sep 2026) — first marked Done on 11 Sep in error; see the M6 record |
 | M7 | Complete the interface, search + tags, design pass (three stages, PRD §10e) | **Done** (15 Sep 2026) |
-| M8 | Deployment to the shared VPS, end-to-end verification | Not started |
+| M8 | Deployment to the shared VPS, end-to-end verification | In progress |
 
 ---
 
@@ -1298,3 +1298,30 @@ claims to be M0, with the verdict and the per-check detail both visible; the tab
 toggle works; a dropped folder uploads with its structure; download works; the file icons
 differ per type; and the layout at ~400px is tidy with nothing overlapping. M7 closed on
 that basis — all three stages verified, not just built.
+
+---
+
+## M8 — Deployment to sharekeep.xyz · In progress
+
+Branch `feature/m8-deployment`. Eight decisions (PRD §10g) and Architecture v1.12 written
+before any code.
+
+### Found before building
+
+- **Every per-IP limit could be bypassed with a forged `X-Forwarded-For`**, and the same
+  header chose the IP written to the audit log. Latent since M1 because no proxy existed
+  locally; live the moment one does. Shown against the share-token limiter: 429 at attempt
+  31 with one claimed address, **no 429 in 80 attempts** with a new one per request.
+- **Backups were in no document.**
+- **Storage CORS re-probed** for the production origins: `allow-origin: *`, so not a blocker.
+- **The frontend reads no cookies server-side**, so host-only API cookies work across hosts.
+- **Issuing a download URL is a `GET` that writes an audit entry**, forgeable by cross-site
+  navigation under Lax, so it becomes a `POST`.
+
+### Plan
+
+| Stage | Scope | Needs the VPS |
+|---|---|---|
+| M8a | Code: CSRF tokens, client-IP hops, sign-up allowlist, download as POST, worker heartbeat, production settings checks, CSP, backup job with encryption | No |
+| M8b | VPS: proxy routes, DNS, TLS, production `.env`, buckets, Resend domain, first deploy, migrations | Yes |
+| M8c | Verification from outside: headers, cookies, CSRF refusal, forged-header refusal, invitation to a second person, restore drill, heartbeat under scan load | Yes |
