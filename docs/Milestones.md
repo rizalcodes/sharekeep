@@ -1322,6 +1322,52 @@ before any code.
 
 | Stage | Scope | Needs the VPS |
 |---|---|---|
-| M8a | Code: CSRF tokens, client-IP hops, sign-up allowlist, download as POST, worker heartbeat, production settings checks, CSP, backup job with encryption | No |
-| M8b | VPS: proxy routes, DNS, TLS, production `.env`, buckets, Resend domain, first deploy, migrations | Yes |
+| M8a | Code: CSRF tokens, client-IP hops, sign-up allowlist, download as POST, worker heartbeat, production settings checks, CSP | **Done** (18 Sep 2026) |
+| M8b | VPS: proxy routes, DNS, TLS, production `.env`, buckets, Resend domain, backup job, first deploy, migrations | Yes |
 | M8c | Verification from outside: headers, cookies, CSRF refusal, forged-header refusal, invitation to a second person, restore drill, heartbeat under scan load | Yes |
+
+### M8a — the seven code items, and what they found
+
+| # | Item | Evidence |
+|---|---|---|
+| 1 | Client address from the trusted proxy hop | 11 tests; **10 fail** on the old function |
+| 2 | CSRF double-submit tokens | 16 tests; **9 fail** without the middleware; browser run |
+| 3 | Download URL issued over POST | GET now 405 and writes no audit row; **fails on GET** |
+| 4 | Invite-only sign-up in production | 6 tests; **3 fail** without the gate |
+| 5 | Worker heartbeat, readiness verdict narrowed | 7 tests; worker stopped on the live stack |
+| 6 | Production configuration refused when wrong | 10 tests; app booted in production mode and refused |
+| 7 | CSP with per-request nonces | 22 browser checks; **3 fail** against the previous build |
+
+The backup job moved to M8b: it needs the VPS's `pg_dump` and the off-host key, so writing
+it without either would be writing it blind.
+
+### Defects found by building it (M8a)
+
+- **Every per-IP limit could be bypassed with a forged `X-Forwarded-For`** — the leftmost
+  entry is the client's own text. 429 at attempt 31 with one claimed address; **no refusal
+  in 80 attempts** with a new one per request. It also chose the IP written to the audit
+  log, and a value that was not an address made the audited write fail, so a failed
+  sign-in carrying one errored instead of returning 401 — reachable without an account.
+- **The frontend never refreshed a session.** Fifteen minutes after signing in, when the
+  browser discards the access cookie, every action failed until a reload sent the person
+  back to sign-in; the 14-day refresh token went unused. Fixed and verified by deleting the
+  cookie in a real browser, which is what expiry does.
+- **Issuing a download URL was a GET that wrote an audit entry**, so a cross-site
+  navigation could forge a "downloaded" row in a signed-in person's name.
+- **The M7c diagnosis did not survive testing.** The claim that a busy worker misses the
+  ping was not reproduced: 41 of 41 pings answered under the same thirteen-scan load. The
+  M7c reading followed a force-recreate of the broker container. Corrected in §7a.
+- **A clean worker stop left its heartbeat behind**, reporting a stopped worker as alive
+  until the key expired; `worker_shutdown` never ran before the process exited.
+- **`SameSite=Lax` and §4.0's enumeration rule are in tension** (not fixed, recorded):
+  sign-up answers 409 for an address that already exists, which §4.0 says it must not
+  reveal. In production the invite-only gate runs first, so only allowlisted or invited
+  addresses can reach that answer; closing it properly needs an email-verification flow,
+  which is not M8 work.
+
+Three of my own harness faults, each worth keeping: httpx attaches cookies when it *builds*
+a request, before event hooks run, so the first unsafe request of every test client carried
+a token and no cookie; the CSRF token rotates at sign-up, so the M7c browser harness kept
+using its pre-session token and got an upload session with no parts; and `page.evaluate`
+runs through CDP, which is exempt from the page's CSP, so an eval test there would have
+passed whatever the policy said.

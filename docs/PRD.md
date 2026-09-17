@@ -371,13 +371,15 @@ closing gaps no document had addressed.
    and a cross-origin frontend/API pair is the topology every milestone since M0 has
    actually exercised (`localhost:3000` to `:8000`). Single-origin path routing was
    rejected as a topology nothing had tested.
-2. **CSRF: a session-bound token delivered in the response body**, held in memory by the
+2. **CSRF: a token delivered in the response body**, held in memory by the
    frontend and sent as `X-CSRF-Token`, compared against an httpOnly cookie. No cookie is
    readable by JavaScript on any subdomain, it works with host-only cookies across the two
    hosts, and a pre-session token covers sign-in and sign-up (login CSRF). Rejected: a
    `Domain=sharekeep.xyz` readable cookie (widens a cookie to every future subdomain) and a
    custom-header-only check (not what §10e decided, and silently removed by one CORS
-   mistake).
+   mistake). *Amended while building (Architecture §22): the token is not bound to the
+   session but carries the `__Host-` prefix and rotates at sign-in and sign-out, because
+   no identifier exists on every request to bind it to.*
 3. **Readiness answers only for what serving a request needs**; the Celery worker is
    reported beside the verdict from a heartbeat written by its own process. Closes the M7c
    finding (Architecture §7a).
