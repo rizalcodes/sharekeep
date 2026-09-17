@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     # through every per-IP limit.
     trusted_proxy_hops: int = Field(default=0, ge=0, le=5)
 
+    # --- Sign-up (Architecture.md §4.0, M8) ---
+    # In production, who may create an account without an invitation. Comma-separated,
+    # case-insensitive, may be empty (invitation-only). Every account draws on one free
+    # tier, so open sign-up on the public internet would let one stranger fill the bucket.
+    # Ignored outside production.
+    signup_allowlist: str = ""
+
     # --- Frontend / CORS ---
     frontend_origin: str = "http://localhost:3000"
 
@@ -203,6 +210,15 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def signup_allowlist_emails(self) -> frozenset[str]:
+        return frozenset(
+            entry.strip().lower() for entry in self.signup_allowlist.split(",") if entry.strip()
+        )
+
+    def may_sign_up_without_invitation(self, email: str) -> bool:
+        return not self.is_production or email.strip().lower() in self.signup_allowlist_emails
 
     @property
     def celery_broker_url(self) -> str:

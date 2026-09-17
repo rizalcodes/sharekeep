@@ -69,6 +69,15 @@ async def signup(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, "This invitation is no longer valid.")
         email = invitation.email.lower()
 
+    # Invite-only in production (Architecture.md §4.0, M8). Checked BEFORE the duplicate
+    # check, so an address outside the allowlist learns only that sign-up is by invitation
+    # — never whether an account already exists for it.
+    if invitation is None and not settings.may_sign_up_without_invitation(email):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Sign-up is by invitation. Ask a workspace owner to invite this address.",
+        )
+
     if await auth.get_user_by_email(db, email) is not None:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
