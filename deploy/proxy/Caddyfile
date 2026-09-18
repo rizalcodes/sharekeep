@@ -1,0 +1,42 @@
+# Reverse proxy for sharekeep.xyz (Architecture.md §7, M8b).
+#
+# Caddy obtains and renews its own Let's Encrypt certificate over HTTP-01. Cloudflare
+# forwards /.well-known/acme-challenge to the origin even while proxying, so this works
+# behind the orange cloud — and Cloudflare's SSL mode is Full (strict), meaning the
+# origin leg is real TLS rather than the padlock-shaped lie that Flexible mode serves.
+#
+# X-Forwarded-For: Caddy APPENDS the address it received from (Cloudflare's edge) to the
+# header Cloudflare already set with the visitor's address. Two entries, so the API reads
+# the client from the second entry from the right — FILESHARE_TRUSTED_PROXY_HOPS=2 (§4.4).
+# Deliberately not rewritten here: the API's own hop arithmetic is the thing under test,
+# and a proxy that quietly replaces the header would hide whether that arithmetic is right.
+{
+	email {$CADDY_ACME_EMAIL}
+	# Caddy's own admin API is not needed and not exposed.
+	admin off
+}
+
+(common) {
+	encode zstd gzip
+	header {
+		# The frontend container sends no HSTS of its own (the API does), so the proxy
+		# states it for every host it serves.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
+
+sharekeep.xyz {
+	import common
+	reverse_proxy fileshare-frontend:3000
+}
+
+api.sharekeep.xyz {
+	import common
+	reverse_proxy fileshare-backend:8000
+}
+
+www.sharekeep.xyz {
+	import common
+	redir https://sharekeep.xyz{uri} permanent
+}

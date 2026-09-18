@@ -96,6 +96,10 @@ class Settings(BaseSettings):
     # Overrides the endpoint derived from supabase_url; also the hook for a local
     # MinIO/LocalStack or self-hosted Supabase.
     storage_endpoint_url: str | None = None
+    # Encrypted database dumps go to their own bucket (Architecture.md §7, M8b), so a
+    # listing of the file bucket never sees them and vice versa.
+    backup_bucket: str | None = None
+
     # Provider-side per-file ceiling. Enforced at upload-init so the user gets a clean
     # rejection instead of a provider error mid-upload.
     max_file_size_bytes: int = SUPABASE_FREE_PLAN_FILE_LIMIT_BYTES

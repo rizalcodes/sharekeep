@@ -2,7 +2,7 @@
 
 **Scope note:** system/service design — how components interact, the background job pipeline, security architecture. Not data structure (`Schema.md`) or naming/conventions (`Rules.md`).
 
-**Version:** v1.13 — corrections from building M8a, 18 September 2026 (see §22). Previously v1.12 (production deployment, §21). Previously v1.11 (readiness semantics, §20). Previously v1.10 (search, version rollback and the trash, §19). Previously v1.9 (audit-log reading and the notification pipeline, §18). Previously v1.8 (share-link resolution, §17). Previously v1.7 (scan pipeline, §16). Previously v1.6 (frontend build-time configuration, §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
+**Version:** v1.14 — the VPS as found, the proxy and Cloudflare, at the start of M8b, 18 September 2026 (see §23). Previously v1.13 (corrections from building M8a, §22). Previously v1.12 (production deployment, §21). Previously v1.11 (readiness semantics, §20). Previously v1.10 (search, version rollback and the trash, §19). Previously v1.9 (audit-log reading and the notification pipeline, §18). Previously v1.8 (share-link resolution, §17). Previously v1.7 (scan pipeline, §16). Previously v1.6 (frontend build-time configuration, §15). Previously v1.5 (resumable upload, §14). Previously v1.4 (M2 content model, §13). Previously v1.3 (M1 auth, §12), v1.2 (storage provider, §11) and v1.1 (kickoff, §10).
 
 ---
 
@@ -525,6 +525,14 @@ No credential or data sharing with the n8n project's services — fully isolated
 
 Reverse proxy / HTTPS: reuse the VPS's existing reverse proxy if one is present from the n8n deployment; otherwise stand up new routing. Confirm actual VPS state at M0/M8.
 
+**The VPS as found (v1.14, M8b, 18 Sep 2026).** Every earlier version of this section assumed this project would join an existing reverse proxy belonging to the paused n8n deployment, meeting it at an external Docker network. That is not the machine we have. The Contabo host (Ubuntu 24.04, 4 vCPU, 7.8 GB RAM, 94 GB free) had **no Docker installed, nothing listening on 80 or 443, and no n8n containers**. There is no proxy to join, so this project stands one up — and the isolation intent survives the change by keeping it *separable*: Caddy runs from its own Compose project under `deploy/proxy/`, on an external `proxy` network that `docker-compose.prod.yml` already expects, so a future stack (n8n returning, or anything else) joins that network without touching this one's compose file.
+
+**Cloudflare sits in front (v1.14, M8b).** `sharekeep.xyz` uses Cloudflare nameservers with the proxy enabled on the apex, `api` and `www` records, so the request chain is client → Cloudflare → Caddy → container. Three consequences, each settled rather than assumed:
+
+- **`FILESHARE_TRUSTED_PROXY_HOPS = 2`.** Cloudflare writes the visitor's address into `X-Forwarded-For` and Caddy appends Cloudflare's edge address, so the client is the second entry from the right (§4.4). Verified against a real request in M8c rather than reasoned about here.
+- **The origin is firewalled to Cloudflare's ranges, and that is part of the §4.4 fix rather than hardening on top of it.** The origin address is public, so anything able to reach port 443 directly can present a request that never passed through Cloudflare and invent as many `X-Forwarded-For` entries as it likes — which would hand it whatever client address it wanted and undo the per-IP limits M8a restored. `ufw` therefore admits 80 and 443 only from Cloudflare's published ranges, and SSH separately.
+- **TLS terminates twice, and the origin leg is real TLS.** Caddy obtains and renews its own Let's Encrypt certificate over HTTP-01, which Cloudflare forwards to the origin even while proxying, and Cloudflare's SSL mode is **Full (strict)**. Flexible mode was rejected outright: it would carry session cookies and file bytes unencrypted over the last leg while the browser still showed a padlock, which is the exact class of dishonesty this product exists to avoid.
+
 **Hosts (v1.12, M8):** `sharekeep.xyz` to `fileshare-frontend:3000`; `api.sharekeep.xyz` to `fileshare-backend:8000`; `www.sharekeep.xyz` permanently redirects to the apex. TLS terminates at the proxy, and HSTS is sent for both hosts. The frontend carries a Content-Security-Policy with a **per-request nonce**, minted in `proxy.ts` (Next.js renamed the middleware convention at 16) with the root layout forcing dynamic rendering — a page rendered at build time has no request to take a nonce from, and its hydration script would then be refused by its own policy. `connect-src` names only the app, the API host and the storage origin: upload parts go browser-direct to storage (§2 step 4), while a download is a top-level navigation to a signed URL, which `connect-src` does not govern. The storage origin therefore joins the API origin as a frontend **build argument**.
 
 What the policy defends and what it does not, established by running it at M8a: an injected inline event handler does not run and the page cannot reach an origin the policy does not name, while `'strict-dynamic'` — which Next needs to load its own chunks — deliberately trusts a script created by another script. The vector that matters here is injected markup, because this product renders file and folder names other people chose. `'unsafe-eval'` is absent in production. `style-src-attr 'unsafe-inline'` remains for two progress bars that set their width through a style attribute, which cannot execute script.
@@ -865,3 +873,11 @@ M8a implemented §21's decisions. Three entries changed because the code disagre
 - **§4.0** — the client-side refresh was added, and the finding that prompted it recorded: the frontend had never called `/auth/refresh`, so sessions effectively lasted fifteen minutes. Serialised across tabs, because reuse detection revokes every session.
 - **§7** — the CSP is specified as built, including the two limits `'strict-dynamic'` imposes and why they are acceptable here.
 - **§7a** — the M7c claim that a busy worker misses the ping was **not reproduced** and is corrected. The design decision is unaffected.
+
+## 23. Amendment Log — v1.14 (18 Sep 2026, start of M8b): the VPS, the proxy, Cloudflare
+
+The diagnostic contradicted an assumption every version of §7 had carried since kickoff.
+
+- **§7** — the VPS is fresh: no Docker, nothing on 80/443, no n8n stack, so there is no existing reverse proxy to join. Caddy is stood up in its own Compose project on the external `proxy` network, which keeps the separability §7 and Rules §7 were written for.
+- **§7** — Cloudflare's proxy is enabled, fixing `FILESHARE_TRUSTED_PROXY_HOPS` at 2, and making the origin firewall part of §4.4's fix: a request that bypasses Cloudflare can forge the whole `X-Forwarded-For` chain.
+- **§7** — origin TLS is Let's Encrypt via HTTP-01 through Cloudflare, with SSL mode Full (strict).

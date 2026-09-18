@@ -100,7 +100,7 @@ secure-file-sharing/
 *(Amended 7 Sep 2026 at kickoff — the original wording said "same `docker-compose.yml`", which would have meant editing a live stack's compose file. Same isolation intent, safer mechanics.)*
 
 - This project ships its **own** `docker-compose.yml` under its own Compose project name, running on the **same VPS** as the n8n project — not merged into n8n's compose file or containers. Services: backend, Celery worker, Celery beat, frontend, and this project's own Postgres and Redis.
-- The two stacks meet only at a shared **external Docker network** with the existing reverse proxy.
+- The two stacks meet only at a shared **external Docker network** with the existing reverse proxy. *(M8b: there was no existing reverse proxy — the VPS was fresh, with no Docker and no n8n containers. This project stands one up in its own Compose project on that external network, so the separability this rule is about is preserved rather than abandoned. See Architecture §7.)*
 - Document clearly in `Architecture.md` which resources are shared with the n8n deployment (the VPS itself, the reverse-proxy network) versus fully separate (databases, Redis, credentials) — no credential or data sharing between the two projects.
 - **No agent account on the VPS** (added at M8). The developer runs deployment steps; Claude prepares them as scripts under `deploy/` and verifies from outside. An account that can run Docker is root over every stack on the host, n8n's included.
 - **Production secrets are generated on the VPS and never reused from a development `.env`** (added at M8). The production `.env` is readable by its owner only and is never copied off the host.

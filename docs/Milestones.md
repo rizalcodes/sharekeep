@@ -1323,7 +1323,7 @@ before any code.
 | Stage | Scope | Needs the VPS |
 |---|---|---|
 | M8a | Code: CSRF tokens, client-IP hops, sign-up allowlist, download as POST, worker heartbeat, production settings checks, CSP | **Done** (18 Sep 2026) |
-| M8b | VPS: proxy routes, DNS, TLS, production `.env`, buckets, Resend domain, backup job, first deploy, migrations | Yes |
+| M8b | VPS: Docker, firewall, Caddy, TLS, production `.env`, buckets, Resend domain, backup job, first deploy, migrations | In progress |
 | M8c | Verification from outside: headers, cookies, CSRF refusal, forged-header refusal, invitation to a second person, restore drill, heartbeat under scan load | Yes |
 
 ### M8a — the seven code items, and what they found
@@ -1371,3 +1371,48 @@ a token and no cookie; the CSRF token rotates at sign-up, so the M7c browser har
 using its pre-session token and got an upload session with no parts; and `page.evaluate`
 runs through CDP, which is exempt from the page's CSP, so an eval test there would have
 passed whatever the policy said.
+
+### M8b — the deploy kit, and the VPS as found
+
+The diagnostic contradicted the premise every version of Architecture §7 had carried: the
+Contabo host was **fresh** — no Docker, nothing listening on 80 or 443, no n8n containers —
+so there was no reverse proxy to join. Three decisions followed (PRD §10g, amended), and
+Architecture v1.14 records them before any script was written.
+
+`deploy/` holds what the developer runs, since no agent has an account on that host:
+
+| Script | What it does |
+|---|---|
+| `01-install-docker.sh` | Docker CE + Compose from Docker's repo, the external `proxy` network, `age` |
+| `02-firewall.sh` | SSH in; 80/443 only from Cloudflare's ranges, in `DOCKER-USER` |
+| `proxy/` | Caddy in its own Compose project: apex, `api`, `www` redirect, Let's Encrypt |
+| `03-deploy.sh` | Build, migrate explicitly, start, read readiness from inside the network |
+| `04-backup.sh` | Nightly dump, encrypted to an off-host age key, copied to its own bucket |
+| `05-restore-drill.sh` | Restores the newest backup into a scratch database and compares it |
+
+**Verified off the VPS, before anyone runs them:**
+
+| Check | Result |
+|---|---|
+| Caddyfile | `caddy validate` in the real image: valid (and `caddy fmt` applied) |
+| Both compose files | `docker compose config` valid; prod publishes **0** ports, dev publishes 4 |
+| Cloudflare ranges | `curl` returns 15 IPv4 and 7 IPv6 ranges, so the script's sanity floor of 10 holds |
+| Backup refusals | empty stdin, and an unencrypted dump, are both refused before anything is sent |
+| `put_object` against Supabase | works — probed with a fake dump, listed, then deleted |
+| Every script | `bash -n` clean |
+
+**Two defects found by that verification**, neither of which would have surfaced until the
+script ran on the VPS at night:
+
+- `upload_backup.py` imported nothing. Run as a path, Python puts the script's own
+  directory on `sys.path` rather than the application root, so `app` was not importable —
+  the same line `bootstrap_storage.py` already carried for the same reason.
+- Python's `urllib` is refused (403) by `cloudflare.com/ips-v4` on user agent, while
+  `curl` is served. The script uses `curl`, so it is fine — but a range fetch that
+  silently returned nothing would have locked the site away from its own CDN, which is why
+  the script refuses to touch the firewall unless the list looks real.
+
+**What only the VPS can prove** (M8c): that the certificate issues through Cloudflare, that
+the firewall admits Cloudflare and refuses a direct connection to the origin address, that
+`TRUSTED_PROXY_HOPS=2` yields the real visitor address in the audit log, that mail reaches
+a second person, and that the restore drill passes.

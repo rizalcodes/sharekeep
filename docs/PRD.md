@@ -407,6 +407,16 @@ closing gaps no document had addressed.
    of M8's verification. The stake was demonstrated locally at M7: losing the database
    leaves every stored object unreachable.
 
+### Amended at M8b (18 Sep 2026), after seeing the VPS
+
+The server was fresh — no Docker, no n8n, nothing on 80/443 — so the "reuse the existing
+reverse proxy" premise did not hold. Three decisions followed: **Caddy in its own Compose
+project** on an external `proxy` network (keeping the separability Rules §7 is about),
+**Let's Encrypt over HTTP-01** for origin TLS with Cloudflare set to Full (strict), and
+**`ufw` admitting 80/443 only from Cloudflare's ranges** — the last one is not extra
+hardening but part of M8a's per-IP fix, since a request that bypasses Cloudflare can forge
+the entire `X-Forwarded-For` chain.
+
 ## 11. Next Steps
 
 1. ~~Draft `Schema.md`, `Rules.md`, `Architecture.md`, and `Design.md`.~~ Done.
