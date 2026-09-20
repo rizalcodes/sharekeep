@@ -90,7 +90,8 @@ say "DOCKER-USER: 80 and 443 from Cloudflare only"
 # Docker creates DOCKER-USER itself; create it if this runs before Docker ever has.
 $SUDO iptables -N DOCKER-USER 2>/dev/null || true
 # Flush only our own marked rules, so re-running does not stack duplicates and does not
-# disturb anything else in the chain.
+# disturb anything else in the chain. This also clears the boot-time DROP the unit installs
+# before calling this script, which is why that rule carries the same marker.
 $SUDO iptables -S DOCKER-USER \
   | grep -- '--comment fileshare-cf' \
   | sed 's/^-A/-D/' \
@@ -129,6 +130,8 @@ $SUDO iptables -S DOCKER-USER | sed -n '1,6p'
 echo "  ... $($SUDO iptables -S DOCKER-USER | grep -c 'fileshare-cf') fileshare rules total"
 
 say "Making them survive a reboot"
+SCRIPT_PATH=$(readlink -f "$0")
+IPTABLES=$(command -v iptables || echo /usr/sbin/iptables)
 # A systemd unit rather than iptables-persistent: it re-applies AFTER docker starts, so
 # ordering between Docker's own chain setup and these rules cannot matter.
 UNIT=/etc/systemd/system/fileshare-firewall.service
@@ -144,7 +147,17 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-ExecStart=$(readlink -f "$0")
+# Closed FIRST, reopened for Cloudflare by the script below. The boot this was written
+# after failed with 203/EXEC - systemd could not execute the script at all - and the
+# result was not "fail closed" but no rules whatever: the promise only held while the
+# script ran. These two lines hold it even when it does not. The "-" prefix lets them
+# fail harmlessly when the chain is already as they want it.
+ExecStartPre=-$IPTABLES -N DOCKER-USER
+ExecStartPre=-$IPTABLES -I DOCKER-USER -p tcp -m multiport --dports 80,443 -m comment --comment fileshare-cf-bootdrop -j DROP
+# Invoked through bash rather than directly: a clone that lost the executable bit (git
+# records mode, and a chmod on Windows does not reach the index) would otherwise break
+# this again.
+ExecStart=/bin/bash $SCRIPT_PATH
 RemainAfterExit=yes
 
 [Install]
