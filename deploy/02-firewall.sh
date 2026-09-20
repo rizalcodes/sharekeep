@@ -12,8 +12,15 @@
 # rules that matter for Caddy therefore go in DOCKER-USER, which Docker consults first and
 # never flushes. ufw still matters for anything listening on the host itself.
 #
-# Run as a normal user with sudo. Safe to re-run: idempotent throughout.
+# Run as root or as a sudo user - both work. Safe to re-run: idempotent throughout.
 set -euo pipefail
+
+# Works whether this runs as root (Contabo's default login) or as a sudo user. Under
+# `set -u` a bare ${USER} is an unbound variable in root's non-login shell, which would
+# abort on the first line rather than on anything meaningful.
+SUDO=""
+[ "$(id -u)" -eq 0 ] || SUDO=sudo
+RUN_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 
 say() { printf '\n== %s ==\n' "$1"; }
 
@@ -33,61 +40,61 @@ if [ "$(echo "$V4" | wc -l)" -lt 10 ]; then
 fi
 
 say "ufw: SSH in, everything else out by default"
-sudo apt-get install -y -qq ufw >/dev/null
-sudo ufw --force default deny incoming
-sudo ufw --force default allow outgoing
+$SUDO apt-get install -y -qq ufw >/dev/null
+$SUDO ufw --force default deny incoming
+$SUDO ufw --force default allow outgoing
 # Added BEFORE enabling, so enabling cannot end this session.
-sudo ufw allow "${SSH_PORT}/tcp" comment 'SSH'
-sudo ufw --force enable
-sudo ufw status verbose | sed -n '1,12p'
+$SUDO ufw allow "${SSH_PORT}/tcp" comment 'SSH'
+$SUDO ufw --force enable
+$SUDO ufw status verbose | sed -n '1,12p'
 
 say "DOCKER-USER: 80 and 443 from Cloudflare only"
 # Docker creates DOCKER-USER itself; create it if this runs before Docker ever has.
-sudo iptables -N DOCKER-USER 2>/dev/null || true
+$SUDO iptables -N DOCKER-USER 2>/dev/null || true
 # Flush only our own marked rules, so re-running does not stack duplicates and does not
 # disturb anything else in the chain.
-sudo iptables -S DOCKER-USER \
+$SUDO iptables -S DOCKER-USER \
   | grep -- '--comment fileshare-cf' \
   | sed 's/^-A/-D/' \
   | while read -r rule; do
       # shellcheck disable=SC2086
-      sudo iptables ${rule}
+      $SUDO iptables ${rule}
     done || true
 
 for cidr in $V4; do
-  sudo iptables -I DOCKER-USER -p tcp -s "$cidr" -m multiport --dports 80,443 \
+  $SUDO iptables -I DOCKER-USER -p tcp -s "$cidr" -m multiport --dports 80,443 \
     -m comment --comment fileshare-cf -j RETURN
 done
 # Anything else reaching those ports is a request that skipped Cloudflare.
-sudo iptables -A DOCKER-USER -p tcp -m multiport --dports 80,443 \
+$SUDO iptables -A DOCKER-USER -p tcp -m multiport --dports 80,443 \
   -m comment --comment fileshare-cf-drop -j DROP
 
 if command -v ip6tables >/dev/null 2>&1; then
-  sudo ip6tables -N DOCKER-USER 2>/dev/null || true
-  sudo ip6tables -S DOCKER-USER \
+  $SUDO ip6tables -N DOCKER-USER 2>/dev/null || true
+  $SUDO ip6tables -S DOCKER-USER \
     | grep -- '--comment fileshare-cf' \
     | sed 's/^-A/-D/' \
     | while read -r rule; do
         # shellcheck disable=SC2086
-        sudo ip6tables ${rule}
+        $SUDO ip6tables ${rule}
       done || true
   for cidr in $V6; do
-    sudo ip6tables -I DOCKER-USER -p tcp -s "$cidr" -m multiport --dports 80,443 \
+    $SUDO ip6tables -I DOCKER-USER -p tcp -s "$cidr" -m multiport --dports 80,443 \
       -m comment --comment fileshare-cf -j RETURN
   done
-  sudo ip6tables -A DOCKER-USER -p tcp -m multiport --dports 80,443 \
+  $SUDO ip6tables -A DOCKER-USER -p tcp -m multiport --dports 80,443 \
     -m comment --comment fileshare-cf-drop -j DROP
 fi
 
 echo "IPv4 rules now in DOCKER-USER:"
-sudo iptables -S DOCKER-USER | sed -n '1,6p'
-echo "  ... $(sudo iptables -S DOCKER-USER | grep -c 'fileshare-cf') fileshare rules total"
+$SUDO iptables -S DOCKER-USER | sed -n '1,6p'
+echo "  ... $($SUDO iptables -S DOCKER-USER | grep -c 'fileshare-cf') fileshare rules total"
 
 say "Making them survive a reboot"
 # A systemd unit rather than iptables-persistent: it re-applies AFTER docker starts, so
 # ordering between Docker's own chain setup and these rules cannot matter.
 UNIT=/etc/systemd/system/fileshare-firewall.service
-sudo tee "$UNIT" >/dev/null <<UNIT_EOF
+$SUDO tee "$UNIT" >/dev/null <<UNIT_EOF
 [Unit]
 Description=Restrict container ports 80/443 to Cloudflare ranges (fileshare)
 After=docker.service
@@ -101,8 +108,8 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 UNIT_EOF
-sudo systemctl daemon-reload
-sudo systemctl enable fileshare-firewall.service >/dev/null
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable fileshare-firewall.service >/dev/null
 echo "enabled fileshare-firewall.service (re-runs this script after Docker on boot)"
 
 say "Done"

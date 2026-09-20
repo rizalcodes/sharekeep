@@ -2,8 +2,15 @@
 # Install Docker Engine and the Compose plugin on Ubuntu 24.04, and create the shared
 # proxy network (Architecture.md §7).
 #
-# Run as a normal user with sudo. Safe to re-run: every step checks first.
+# Run as root or as a sudo user - both work. Safe to re-run: every step checks first.
 set -euo pipefail
+
+# Works whether this runs as root (Contabo's default login) or as a sudo user. Under
+# `set -u` a bare ${USER} is an unbound variable in root's non-login shell, which would
+# abort on the first line rather than on anything meaningful.
+SUDO=""
+[ "$(id -u)" -eq 0 ] || SUDO=sudo
+RUN_USER="${SUDO_USER:-${USER:-$(id -un)}}"
 
 say() { printf '\n== %s ==\n' "$1"; }
 
@@ -23,41 +30,43 @@ if command -v docker >/dev/null 2>&1; then
 else
   say "Installing Docker from Docker's own apt repository"
   # Not Ubuntu's docker.io package: that one lags, and the Compose plugin ships from here.
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq ca-certificates curl gnupg
-  sudo install -m 0755 -d /etc/apt/keyrings
+  $SUDO apt-get update -qq
+  $SUDO apt-get install -y -qq ca-certificates curl gnupg git
+  $SUDO install -m 0755 -d /etc/apt/keyrings
   if [ ! -f /etc/apt/keyrings/docker.asc ]; then
-    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-    sudo chmod a+r /etc/apt/keyrings/docker.asc
+    $SUDO curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    $SUDO chmod a+r /etc/apt/keyrings/docker.asc
   fi
   echo \
     "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] \
 https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
-    | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq \
+    | $SUDO tee /etc/apt/sources.list.d/docker.list >/dev/null
+  $SUDO apt-get update -qq
+  $SUDO apt-get install -y -qq \
     docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  sudo systemctl enable --now docker
+  $SUDO systemctl enable --now docker
   docker --version
   docker compose version
 fi
 
-say "Adding ${USER} to the docker group"
-# Group membership means this user can run Docker without sudo — which is root-equivalent
-# on this host. That is why the deployment runs as you and no agent has an account here
-# (Rules.md §7).
-if id -nG "${USER}" | tr ' ' '\n' | grep -qx docker; then
-  echo "already a member"
+say "Docker group membership"
+# Membership lets a user run Docker without sudo - which is root-equivalent on this host.
+# That is why deployment runs as you and no agent has an account here (Rules.md 7).
+if [ "$(id -u)" -eq 0 ]; then
+  echo "running as root: nothing to add"
+elif id -nG "$RUN_USER" | tr ' ' '
+' | grep -qx docker; then
+  echo "$RUN_USER is already a member"
 else
-  sudo usermod -aG docker "${USER}"
-  echo "added — log out and back in (or run: newgrp docker) before the next script"
+  $SUDO usermod -aG docker "$RUN_USER"
+  echo "added $RUN_USER - log out and back in (or run: newgrp docker) first"
 fi
 
 say "Creating the shared proxy network"
-if sudo docker network inspect proxy >/dev/null 2>&1; then
+if $SUDO docker network inspect proxy >/dev/null 2>&1; then
   echo "network 'proxy' already exists"
 else
-  sudo docker network create proxy
+  $SUDO docker network create proxy
   echo "created network 'proxy'"
 fi
 
@@ -65,7 +74,7 @@ say "Installing age, for encrypting database dumps before they leave this host"
 if command -v age >/dev/null 2>&1; then
   echo "age already installed: $(age --version)"
 else
-  sudo apt-get install -y -qq age
+  $SUDO apt-get install -y -qq age
   echo "installed: $(age --version)"
 fi
 

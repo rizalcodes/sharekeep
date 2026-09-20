@@ -18,6 +18,13 @@
 # and M8c runs it.
 set -euo pipefail
 
+# Works whether this runs as root (Contabo's default login) or as a sudo user. Under
+# `set -u` a bare ${USER} is an unbound variable in root's non-login shell, which would
+# abort on the first line rather than on anything meaningful.
+SUDO=""
+[ "$(id -u)" -eq 0 ] || SUDO=sudo
+RUN_USER="${SUDO_USER:-${USER:-$(id -un)}}"
+
 APP_DIR="${APP_DIR:-/opt/fileshare}"
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/fileshare}"
 KEEP_LOCAL="${KEEP_LOCAL:-7}"
@@ -26,7 +33,7 @@ say() { printf '\n== %s ==\n' "$1"; }
 
 if [ "${1:-}" = "--install" ]; then
   say "Installing the nightly timer"
-  sudo tee /etc/systemd/system/fileshare-backup.service >/dev/null <<UNIT_EOF
+  $SUDO tee /etc/systemd/system/fileshare-backup.service >/dev/null <<UNIT_EOF
 [Unit]
 Description=Nightly encrypted Postgres backup (fileshare)
 After=docker.service
@@ -34,11 +41,11 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-User=${USER}
+User=$RUN_USER
 WorkingDirectory=${APP_DIR}
 ExecStart=$(readlink -f "$0")
 UNIT_EOF
-  sudo tee /etc/systemd/system/fileshare-backup.timer >/dev/null <<'UNIT_EOF'
+  $SUDO tee /etc/systemd/system/fileshare-backup.timer >/dev/null <<'UNIT_EOF'
 [Unit]
 Description=Run the fileshare backup nightly
 
@@ -50,8 +57,8 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 UNIT_EOF
-  sudo systemctl daemon-reload
-  sudo systemctl enable --now fileshare-backup.timer
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable --now fileshare-backup.timer
   systemctl list-timers fileshare-backup.timer --no-pager
   exit 0
 fi
