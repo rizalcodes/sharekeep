@@ -28,14 +28,52 @@ V4_URL=https://www.cloudflare.com/ips-v4
 V6_URL=https://www.cloudflare.com/ips-v6
 SSH_PORT="${SSH_PORT:-22}"
 
+# Where the last good answer is kept. At boot this script runs again, and the network may
+# not be usable yet: fetching is attempted, the cache is the fallback, and if neither can
+# supply a list the chain is closed rather than left open (see below).
+CACHE_DIR=/etc/fileshare
+CACHE_V4="$CACHE_DIR/cloudflare-ips.v4"
+CACHE_V6="$CACHE_DIR/cloudflare-ips.v6"
+
+# The floor is per family, because the two lists are not the same size: Cloudflare
+# publishes 15 IPv4 ranges and only 7 IPv6 ones. A single floor of 10 rejected every
+# healthy IPv6 fetch and sent the whole script down the fail-closed path with the network
+# working perfectly — which would have closed 80/443 on a site that had never opened.
+# Found by running it against the real endpoints, not by reading it.
+plausible() { [ "$(printf '%s' "$1" | grep -c '/')" -ge "$2" ]; }
+
+fetch_with_retries() {
+  # Three attempts: at boot, DNS and routing often arrive a second or two after the unit.
+  for attempt in 1 2 3; do
+    if body=$(curl -fsS --max-time 20 "$1" 2>/dev/null) && plausible "$body" "$2"; then
+      printf '%s' "$body"
+      return 0
+    fi
+    sleep 5
+  done
+  return 1
+}
+
 say "Fetching Cloudflare's published ranges"
-V4=$(curl -fsS "$V4_URL")
-V6=$(curl -fsS "$V6_URL")
-echo "$(echo "$V4" | wc -l) IPv4 ranges, $(echo "$V6" | wc -l) IPv6 ranges"
-# A truncated or hijacked answer here would lock the site away from its own CDN, so refuse
-# anything that does not look like the real list.
-if [ "$(echo "$V4" | wc -l)" -lt 10 ]; then
-  echo "ERROR: that is not Cloudflare's list. Aborting without touching the firewall." >&2
+if V4=$(fetch_with_retries "$V4_URL" 10) && V6=$(fetch_with_retries "$V6_URL" 5); then
+  echo "fetched: $(echo "$V4" | wc -l) IPv4, $(echo "$V6" | wc -l) IPv6"
+  $SUDO mkdir -p "$CACHE_DIR"
+  printf '%s\n' "$V4" | $SUDO tee "$CACHE_V4" >/dev/null
+  printf '%s\n' "$V6" | $SUDO tee "$CACHE_V6" >/dev/null
+elif [ -s "$CACHE_V4" ]; then
+  V4=$(cat "$CACHE_V4")
+  V6=$(cat "$CACHE_V6" 2>/dev/null || true)
+  echo "WARNING: could not reach Cloudflare; using the cached list from $CACHE_V4"
+  echo "cached: $(echo "$V4" | wc -l) IPv4, $(echo "$V6" | wc -l) IPv6"
+else
+  # Fail CLOSED. The alternative — exiting before any rule is installed — leaves 80/443
+  # open to the whole internet, which is the opposite of what this script advertises, and
+  # it would happen silently at boot. A site that is unreachable is loud and fixable; an
+  # origin quietly exposed is neither.
+  echo "ERROR: no Cloudflare list and no cache. Closing 80/443 entirely." >&2
+  $SUDO iptables -N DOCKER-USER 2>/dev/null || true
+  $SUDO iptables -A DOCKER-USER -p tcp -m multiport --dports 80,443 \
+    -m comment --comment fileshare-cf-drop -j DROP
   exit 1
 fi
 
@@ -97,7 +135,11 @@ UNIT=/etc/systemd/system/fileshare-firewall.service
 $SUDO tee "$UNIT" >/dev/null <<UNIT_EOF
 [Unit]
 Description=Restrict container ports 80/443 to Cloudflare ranges (fileshare)
-After=docker.service
+# network-online as well as docker: this script fetches Cloudflare's ranges, and at boot
+# the network is often a moment behind the unit. It falls back to its cache and then to
+# closing the ports, but waiting first means the common case needs neither.
+Wants=network-online.target
+After=docker.service network-online.target
 Requires=docker.service
 
 [Service]
@@ -113,5 +155,6 @@ $SUDO systemctl enable fileshare-firewall.service >/dev/null
 echo "enabled fileshare-firewall.service (re-runs this script after Docker on boot)"
 
 say "Done"
+echo "Cached ranges: $CACHE_V4"
 echo "Verification belongs in M8c: https://sharekeep.xyz must work while"
 echo "https://158.220.109.109 must not answer at all."
