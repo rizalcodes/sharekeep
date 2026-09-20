@@ -46,7 +46,16 @@ if [ "${#missing[@]}" -gt 0 ]; then
   printf '  - %s\n' "${missing[@]}"
   exit 1
 fi
-echo "every required variable has a value"
+# Filled in is not the same as filled in with something real. A leftover <project_ref>
+# from the template passed the emptiness check, built for ten minutes, and then failed
+# when storage was first used - with an error naming a hostname nobody had ever typed.
+placeholders=$(grep -nE '^FILESHARE_[A-Z_]+=.*<[a-z_]+>' .env || true)
+if [ -n "$placeholders" ]; then
+  echo "ERROR: these still hold template placeholders:"
+  echo "$placeholders"
+  exit 1
+fi
+echo "every required variable has a value, and none is still a placeholder"
 
 say "Checking the proxy network exists"
 docker network inspect proxy >/dev/null 2>&1 || {

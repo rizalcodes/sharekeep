@@ -4,6 +4,7 @@ All environment variables use the FILESHARE_ prefix (Rules.md §2) so this proje
 cannot collide with the AGENCY_-prefixed variables of the n8n project sharing the VPS.
 """
 
+import re
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
@@ -316,6 +317,18 @@ class Settings(BaseSettings):
             )
         if len(self.jwt_secret.get_secret_value().encode()) < 32:
             errors.append("FILESHARE_JWT_SECRET must be at least 32 bytes")
+        # A value copied from the template and never filled in. Caught here because the
+        # failure otherwise arrives much later and names a host nobody typed: a leftover
+        # <project_ref> in the Supabase URL becomes the S3 endpoint
+        # https://<project_ref>.storage.supabase.co, and only the first storage call says so.
+        for name, value in (
+            ("FILESHARE_SUPABASE_URL", self.supabase_url),
+            ("FILESHARE_FRONTEND_ORIGIN", self.frontend_origin),
+            ("FILESHARE_SUPABASE_STORAGE_BUCKET", self.supabase_storage_bucket),
+            ("FILESHARE_RESEND_FROM_EMAIL", self.resend_from_email),
+        ):
+            if value and re.search(r"<[a-z_]+>", value):
+                errors.append(f"{name} still holds a template placeholder: {value}")
         return errors
 
 
