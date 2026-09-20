@@ -1416,3 +1416,29 @@ script ran on the VPS at night:
 the firewall admits Cloudflare and refuses a direct connection to the origin address, that
 `TRUSTED_PROXY_HOPS=2` yields the real visitor address in the audit log, that mail reaches
 a second person, and that the restore drill passes.
+
+### Defects found by running M8b on the real host
+
+Every one of these passed a local check and failed on the VPS, which is the argument for
+running the thing rather than reasoning about it.
+
+- **The firewall blocked the containers' own outbound traffic.** `DOCKER-USER` hangs off
+  `FORWARD`, which carries container egress as well as ingress, so a catch-all matching
+  `--dports 80,443` dropped every outbound HTTPS call a container made. Caddy could not
+  reach Let's Encrypt; the backend would not have reached Supabase, VirusTotal or Resend
+  either. The host looked healthy throughout — `apt` and `docker pull` never traverse
+  `FORWARD`. Every rule is now pinned to the public interface with `-i`.
+- **systemd could not execute the scripts at all** (`203/EXEC`): they were mode 100644 in
+  git, because a `chmod +x` on Windows never reaches the index. Running them by hand as
+  `bash script.sh` had hidden it.
+- **That failure was not fail-closed but wide open.** With the unit dead there were no
+  rules whatever: the guarantee only held while the script ran. The unit now closes 80/443
+  in `ExecStartPre`, before the script is invoked, and the script clears that rule once the
+  Cloudflare rules are in place.
+- **The plausibility floor rejected a healthy IPv6 fetch.** Cloudflare publishes 15 IPv4
+  ranges and 7 IPv6; a single floor of "at least 10" sent the script down the fail-closed
+  path with the network working perfectly, which would have closed the ports on a site that
+  had never opened.
+- **The boot path fetched over a network that was not up yet**, and `set -e` ended the
+  script before any rule existed. Now: retries, a cached copy in `/etc/fileshare`, and
+  closing the ports outright if neither is available.

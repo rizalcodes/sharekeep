@@ -6,6 +6,14 @@
 # never passed through Cloudflare, and can invent the whole X-Forwarded-For chain — which
 # would hand it any client address it liked and undo every per-IP limit (§4.4).
 #
+# THE SECOND SUBTLETY (found when Caddy could not reach Let's Encrypt): DOCKER-USER hangs
+# off the FORWARD chain, which carries container EGRESS as well as ingress. A rule matching
+# "--dports 80,443" with no interface therefore drops every outbound HTTPS call a container
+# makes - ACME, Supabase, VirusTotal, Resend - while looking like an inbound rule. Every
+# rule below is pinned to the public interface with -i, so it can only match traffic
+# arriving from outside. Host traffic (apt, docker pull) never traverses FORWARD at all,
+# which is why the host looked healthy while containers had no internet.
+#
 # THE SUBTLETY: ufw does not filter traffic to ports a container published. Docker writes
 # its own DNAT and FORWARD rules, and that path never traverses ufw's INPUT chain, so a
 # ufw "deny 443" with a published port is a rule that looks right and blocks nothing. The
@@ -72,7 +80,10 @@ else
   # origin quietly exposed is neither.
   echo "ERROR: no Cloudflare list and no cache. Closing 80/443 entirely." >&2
   $SUDO iptables -N DOCKER-USER 2>/dev/null || true
-  $SUDO iptables -A DOCKER-USER -p tcp -m multiport --dports 80,443 \
+  # Pinned to the public interface like every other rule here: closing the site is the
+  # intent, cutting the containers off from the internet is not.
+  CLOSE_IF=$(ip route show default | awk '{print $5; exit}')
+  $SUDO iptables -A DOCKER-USER ${CLOSE_IF:+-i "$CLOSE_IF"} -p tcp -m multiport --dports 80,443 \
     -m comment --comment fileshare-cf-drop -j DROP
   exit 1
 fi
@@ -86,7 +97,15 @@ $SUDO ufw allow "${SSH_PORT}/tcp" comment 'SSH'
 $SUDO ufw --force enable
 $SUDO ufw status verbose | sed -n '1,12p'
 
-say "DOCKER-USER: 80 and 443 from Cloudflare only"
+say "DOCKER-USER: 80 and 443 from Cloudflare only, INBOUND only"
+# The interface the default route leaves by. Rules are pinned to it so they cannot match
+# a container's own outbound connections, which arrive on a docker bridge instead.
+EXT_IF=$(ip route show default | awk '{print $5; exit}')
+if [ -z "$EXT_IF" ]; then
+  echo "ERROR: no default route, so the public interface cannot be identified." >&2
+  exit 1
+fi
+echo "public interface: $EXT_IF"
 # Docker creates DOCKER-USER itself; create it if this runs before Docker ever has.
 $SUDO iptables -N DOCKER-USER 2>/dev/null || true
 # Flush only our own marked rules, so re-running does not stack duplicates and does not
@@ -101,11 +120,11 @@ $SUDO iptables -S DOCKER-USER \
     done || true
 
 for cidr in $V4; do
-  $SUDO iptables -I DOCKER-USER -p tcp -s "$cidr" -m multiport --dports 80,443 \
+  $SUDO iptables -I DOCKER-USER -i "$EXT_IF" -p tcp -s "$cidr" -m multiport --dports 80,443 \
     -m comment --comment fileshare-cf -j RETURN
 done
-# Anything else reaching those ports is a request that skipped Cloudflare.
-$SUDO iptables -A DOCKER-USER -p tcp -m multiport --dports 80,443 \
+# Anything else arriving on the public interface for those ports skipped Cloudflare.
+$SUDO iptables -A DOCKER-USER -i "$EXT_IF" -p tcp -m multiport --dports 80,443 \
   -m comment --comment fileshare-cf-drop -j DROP
 
 if command -v ip6tables >/dev/null 2>&1; then
@@ -118,10 +137,10 @@ if command -v ip6tables >/dev/null 2>&1; then
         $SUDO ip6tables ${rule}
       done || true
   for cidr in $V6; do
-    $SUDO ip6tables -I DOCKER-USER -p tcp -s "$cidr" -m multiport --dports 80,443 \
+    $SUDO ip6tables -I DOCKER-USER -i "$EXT_IF" -p tcp -s "$cidr" -m multiport --dports 80,443 \
       -m comment --comment fileshare-cf -j RETURN
   done
-  $SUDO ip6tables -A DOCKER-USER -p tcp -m multiport --dports 80,443 \
+  $SUDO ip6tables -A DOCKER-USER -i "$EXT_IF" -p tcp -m multiport --dports 80,443 \
     -m comment --comment fileshare-cf-drop -j DROP
 fi
 
@@ -153,7 +172,7 @@ Type=oneshot
 # script ran. These two lines hold it even when it does not. The "-" prefix lets them
 # fail harmlessly when the chain is already as they want it.
 ExecStartPre=-$IPTABLES -N DOCKER-USER
-ExecStartPre=-$IPTABLES -I DOCKER-USER -p tcp -m multiport --dports 80,443 -m comment --comment fileshare-cf-bootdrop -j DROP
+ExecStartPre=-$IPTABLES -I DOCKER-USER -i $EXT_IF -p tcp -m multiport --dports 80,443 -m comment --comment fileshare-cf-bootdrop -j DROP
 # Invoked through bash rather than directly: a clone that lost the executable bit (git
 # records mode, and a chmod on Windows does not reach the index) would otherwise break
 # this again.
