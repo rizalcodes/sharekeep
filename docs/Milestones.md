@@ -13,7 +13,7 @@ has actually been performed, not when the code merely exists (Rules.md §6).
 | M5 | Sharing: 4 link types, password protection, expiry, modifiers | **Done** (11 Sep 2026) |
 | M6 | Audit log UI + email notifications (Resend) | **Done** (12 Sep 2026) — first marked Done on 11 Sep in error; see the M6 record |
 | M7 | Complete the interface, search + tags, design pass (three stages, PRD §10e) | **Done** (15 Sep 2026) |
-| M8 | Deployment to the shared VPS, end-to-end verification | Not started |
+| M8 | Deployment to the VPS, end-to-end verification | **Done** (21 Sep 2026) |
 
 ---
 
@@ -1298,3 +1298,184 @@ claims to be M0, with the verdict and the per-check detail both visible; the tab
 toggle works; a dropped folder uploads with its structure; download works; the file icons
 differ per type; and the layout at ~400px is tidy with nothing overlapping. M7 closed on
 that basis — all three stages verified, not just built.
+
+---
+
+## M8 — Deployment to sharekeep.xyz · In progress
+
+Branch `feature/m8-deployment`. Eight decisions (PRD §10g) and Architecture v1.12 written
+before any code.
+
+### Found before building
+
+- **Every per-IP limit could be bypassed with a forged `X-Forwarded-For`**, and the same
+  header chose the IP written to the audit log. Latent since M1 because no proxy existed
+  locally; live the moment one does. Shown against the share-token limiter: 429 at attempt
+  31 with one claimed address, **no 429 in 80 attempts** with a new one per request.
+- **Backups were in no document.**
+- **Storage CORS re-probed** for the production origins: `allow-origin: *`, so not a blocker.
+- **The frontend reads no cookies server-side**, so host-only API cookies work across hosts.
+- **Issuing a download URL is a `GET` that writes an audit entry**, forgeable by cross-site
+  navigation under Lax, so it becomes a `POST`.
+
+### Plan
+
+| Stage | Scope | Needs the VPS |
+|---|---|---|
+| M8a | Code: CSRF tokens, client-IP hops, sign-up allowlist, download as POST, worker heartbeat, production settings checks, CSP | **Done** (18 Sep 2026) |
+| M8b | VPS: Docker, firewall, Caddy, TLS, production `.env`, buckets, Resend domain, backup job, first deploy, migrations | **Done** (20 Sep 2026) |
+| M8c | Verification from outside: headers, cookies, CSRF refusal, forged-header refusal, invitation to a second person, restore drill, heartbeat under scan load | **Done** (21 Sep 2026) |
+
+### M8a — the seven code items, and what they found
+
+| # | Item | Evidence |
+|---|---|---|
+| 1 | Client address from the trusted proxy hop | 11 tests; **10 fail** on the old function |
+| 2 | CSRF double-submit tokens | 16 tests; **9 fail** without the middleware; browser run |
+| 3 | Download URL issued over POST | GET now 405 and writes no audit row; **fails on GET** |
+| 4 | Invite-only sign-up in production | 6 tests; **3 fail** without the gate |
+| 5 | Worker heartbeat, readiness verdict narrowed | 7 tests; worker stopped on the live stack |
+| 6 | Production configuration refused when wrong | 10 tests; app booted in production mode and refused |
+| 7 | CSP with per-request nonces | 22 browser checks; **3 fail** against the previous build |
+
+The backup job moved to M8b: it needs the VPS's `pg_dump` and the off-host key, so writing
+it without either would be writing it blind.
+
+### Defects found by building it (M8a)
+
+- **Every per-IP limit could be bypassed with a forged `X-Forwarded-For`** — the leftmost
+  entry is the client's own text. 429 at attempt 31 with one claimed address; **no refusal
+  in 80 attempts** with a new one per request. It also chose the IP written to the audit
+  log, and a value that was not an address made the audited write fail, so a failed
+  sign-in carrying one errored instead of returning 401 — reachable without an account.
+- **The frontend never refreshed a session.** Fifteen minutes after signing in, when the
+  browser discards the access cookie, every action failed until a reload sent the person
+  back to sign-in; the 14-day refresh token went unused. Fixed and verified by deleting the
+  cookie in a real browser, which is what expiry does.
+- **Issuing a download URL was a GET that wrote an audit entry**, so a cross-site
+  navigation could forge a "downloaded" row in a signed-in person's name.
+- **The M7c diagnosis did not survive testing.** The claim that a busy worker misses the
+  ping was not reproduced: 41 of 41 pings answered under the same thirteen-scan load. The
+  M7c reading followed a force-recreate of the broker container. Corrected in §7a.
+- **A clean worker stop left its heartbeat behind**, reporting a stopped worker as alive
+  until the key expired; `worker_shutdown` never ran before the process exited.
+- **`SameSite=Lax` and §4.0's enumeration rule are in tension** (not fixed, recorded):
+  sign-up answers 409 for an address that already exists, which §4.0 says it must not
+  reveal. In production the invite-only gate runs first, so only allowlisted or invited
+  addresses can reach that answer; closing it properly needs an email-verification flow,
+  which is not M8 work.
+
+Three of my own harness faults, each worth keeping: httpx attaches cookies when it *builds*
+a request, before event hooks run, so the first unsafe request of every test client carried
+a token and no cookie; the CSRF token rotates at sign-up, so the M7c browser harness kept
+using its pre-session token and got an upload session with no parts; and `page.evaluate`
+runs through CDP, which is exempt from the page's CSP, so an eval test there would have
+passed whatever the policy said.
+
+### M8b — the deploy kit, and the VPS as found
+
+The diagnostic contradicted the premise every version of Architecture §7 had carried: the
+Contabo host was **fresh** — no Docker, nothing listening on 80 or 443, no n8n containers —
+so there was no reverse proxy to join. Three decisions followed (PRD §10g, amended), and
+Architecture v1.14 records them before any script was written.
+
+`deploy/` holds what the developer runs, since no agent has an account on that host:
+
+| Script | What it does |
+|---|---|
+| `01-install-docker.sh` | Docker CE + Compose from Docker's repo, the external `proxy` network, `age` |
+| `02-firewall.sh` | SSH in; 80/443 only from Cloudflare's ranges, in `DOCKER-USER` |
+| `proxy/` | Caddy in its own Compose project: apex, `api`, `www` redirect, Let's Encrypt |
+| `03-deploy.sh` | Build, migrate explicitly, start, read readiness from inside the network |
+| `04-backup.sh` | Nightly dump, encrypted to an off-host age key, copied to its own bucket |
+| `05-restore-drill.sh` | Restores the newest backup into a scratch database and compares it |
+
+**Verified off the VPS, before anyone runs them:**
+
+| Check | Result |
+|---|---|
+| Caddyfile | `caddy validate` in the real image: valid (and `caddy fmt` applied) |
+| Both compose files | `docker compose config` valid; prod publishes **0** ports, dev publishes 4 |
+| Cloudflare ranges | `curl` returns 15 IPv4 and 7 IPv6 ranges, so the script's sanity floor of 10 holds |
+| Backup refusals | empty stdin, and an unencrypted dump, are both refused before anything is sent |
+| `put_object` against Supabase | works — probed with a fake dump, listed, then deleted |
+| Every script | `bash -n` clean |
+
+**Two defects found by that verification**, neither of which would have surfaced until the
+script ran on the VPS at night:
+
+- `upload_backup.py` imported nothing. Run as a path, Python puts the script's own
+  directory on `sys.path` rather than the application root, so `app` was not importable —
+  the same line `bootstrap_storage.py` already carried for the same reason.
+- Python's `urllib` is refused (403) by `cloudflare.com/ips-v4` on user agent, while
+  `curl` is served. The script uses `curl`, so it is fine — but a range fetch that
+  silently returned nothing would have locked the site away from its own CDN, which is why
+  the script refuses to touch the firewall unless the list looks real.
+
+**What only the VPS can prove** (M8c): that the certificate issues through Cloudflare, that
+the firewall admits Cloudflare and refuses a direct connection to the origin address, that
+`TRUSTED_PROXY_HOPS=2` yields the real visitor address in the audit log, that mail reaches
+a second person, and that the restore drill passes.
+
+### Defects found by running M8b on the real host
+
+Every one of these passed a local check and failed on the VPS, which is the argument for
+running the thing rather than reasoning about it.
+
+- **The firewall blocked the containers' own outbound traffic.** `DOCKER-USER` hangs off
+  `FORWARD`, which carries container egress as well as ingress, so a catch-all matching
+  `--dports 80,443` dropped every outbound HTTPS call a container made. Caddy could not
+  reach Let's Encrypt; the backend would not have reached Supabase, VirusTotal or Resend
+  either. The host looked healthy throughout — `apt` and `docker pull` never traverse
+  `FORWARD`. Every rule is now pinned to the public interface with `-i`.
+- **systemd could not execute the scripts at all** (`203/EXEC`): they were mode 100644 in
+  git, because a `chmod +x` on Windows never reaches the index. Running them by hand as
+  `bash script.sh` had hidden it.
+- **That failure was not fail-closed but wide open.** With the unit dead there were no
+  rules whatever: the guarantee only held while the script ran. The unit now closes 80/443
+  in `ExecStartPre`, before the script is invoked, and the script clears that rule once the
+  Cloudflare rules are in place.
+- **The plausibility floor rejected a healthy IPv6 fetch.** Cloudflare publishes 15 IPv4
+  ranges and 7 IPv6; a single floor of "at least 10" sent the script down the fail-closed
+  path with the network working perfectly, which would have closed the ports on a site that
+  had never opened.
+- **The boot path fetched over a network that was not up yet**, and `set -e` ended the
+  script before any rule existed. Now: retries, a cached copy in `/etc/fileshare`, and
+  closing the ports outright if neither is available.
+
+## M8c — verification from outside · Done
+
+Run as an ordinary client on the public internet, through Cloudflare, with no privileged
+access to the host: what a visitor or an attacker can actually reach, rather than what the
+logs on the box claim.
+
+| # | Check | Evidence |
+|---|---|---|
+| 1 | TLS as a client sees it | `ssl_verify_result=0`, CN `sharekeep.xyz`, Let's Encrypt, valid to 17 Dec; `www` 301s to the apex |
+| 2 | Security headers and CSP | HSTS, `frame-ancestors 'none'`, nosniff, no-referrer, nonce CSP naming only the app, the API and the storage host — **and enforced in Chrome**: an injected inline handler did not run, a fetch to an unnamed origin was refused |
+| 3 | Cookie flags | `__Host-fileshare_csrf; HttpOnly; Path=/; SameSite=lax; Secure`, no `Domain` |
+| 4 | CSRF refusal | no header 403 `csrf_failed`; guessed token 403; PUT/PATCH/DELETE 403; **matching pair 401**, so the guard passes legitimate traffic; `/health/ready` unguarded |
+| 5 | Forged `X-Forwarded-For` | 429 at attempt **31** with a new claimed address per request; audit log recorded the real IPv6 visitor for all three probes, including one padding three fake entries in front to shift the window |
+| 6 | Invitation to a second person | delivered from `notifications@mail.sharekeep.xyz`, no redirect banner, link on our own domain, second account joined the workspace |
+| 7 | Restore drill | `RESTORE DRILL PASSED` — all 11 tables identical between live and restored |
+| 8 | Heartbeat under scan load | 8-10 simultaneous uploads: every sample `200` with `"alive":true` |
+| — | Extras | `cf-cache-status: DYNAMIC` (Cloudflare caches no API response); the origin address answers neither 80 nor 443 |
+
+### The defect M8c found
+
+**Every audited action recorded Cloudflare's edge address as the visitor**, for a day,
+including the developer's own sign-in. Hop arithmetic assumes each proxy *appends* to
+`X-Forwarded-For`; Caddy does so only for a sender in its `trusted_proxies` list, and
+otherwise **replaces** the header. With the list unset the backend saw one entry and the
+short-chain fallback returned it. Two fixes, and the second matters more than the first:
+the list is now generated from the same Cloudflare ranges the firewall admits, and a chain
+shorter than the configured hop count is reported rather than guessed — the old fallback is
+exactly what made a misconfigured proxy look healthy. A comment in the Caddyfile asserting
+that Caddy appends was simply wrong, and believing it is why `hops=2` looked sufficient.
+
+Three harness faults of my own, each corrected rather than worked around: the CSP
+violations counted against the app were the two attacks the test itself injected; an
+`ERR_ABORTED` on an RSC prefetch was my own navigation cancelling it (checked separately —
+the prefetch returns 200 undisturbed and `/login` to `/signup` navigates client-side with
+no console errors); and `playwright-core` had been cleaned out of the scratchpad, which is
+why the first production browser run could not start at all.

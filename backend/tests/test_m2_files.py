@@ -192,7 +192,7 @@ async def test_a_flagged_file_is_never_downloadable(make_client, db):
     file.scan_status = ScanStatus.FLAGGED
     await db.flush()
 
-    response = await client.get(f"{WS}/{ws}/files/{file_id}/download")
+    response = await client.post(f"{WS}/{ws}/files/{file_id}/download")
     assert response.status_code == 403
     assert "flagged" in response.json()["detail"].lower()
 
@@ -209,7 +209,7 @@ async def test_a_pending_file_is_not_downloadable(make_client, db):
     file.scan_status = ScanStatus.PENDING
     await db.flush()
 
-    assert (await client.get(f"{WS}/{ws}/files/{file_id}/download")).status_code == 403
+    assert (await client.post(f"{WS}/{ws}/files/{file_id}/download")).status_code == 403
 
 
 async def test_download_returns_a_signed_url_not_bytes(make_client):
@@ -217,7 +217,7 @@ async def test_download_returns_a_signed_url_not_bytes(make_client):
     client, ws = await _workspace(make_client, "f-dl@example.com")
     file_id = (await upload_file(client, ws, "ok.txt")).json()["id"]
 
-    response = await client.get(f"{WS}/{ws}/files/{file_id}/download")
+    response = await client.post(f"{WS}/{ws}/files/{file_id}/download")
     assert response.status_code == 200
     body = response.json()
     assert body["url"].startswith("https://")
@@ -287,7 +287,7 @@ async def test_file_from_another_workspace_is_invisible(make_client):
     file_id = (await upload_file(alice, alice_ws, "secret.txt")).json()["id"]
 
     assert (await bob.get(f"{WS}/{bob_ws}/files/{file_id}")).status_code == 404
-    assert (await bob.get(f"{WS}/{bob_ws}/files/{file_id}/download")).status_code == 404
+    assert (await bob.post(f"{WS}/{bob_ws}/files/{file_id}/download")).status_code == 404
     assert (await bob.delete(f"{WS}/{bob_ws}/files/{file_id}")).status_code == 404
     assert (await bob.get(f"{WS}/{alice_ws}/files/{file_id}")).status_code == 404
     assert (await alice.get(f"{WS}/{alice_ws}/files/{file_id}")).status_code == 200

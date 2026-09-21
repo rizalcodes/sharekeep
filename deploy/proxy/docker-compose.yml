@@ -1,0 +1,42 @@
+# The shared reverse proxy, in its own Compose project (Architecture.md §7, M8b).
+#
+# Separate from the application's compose file on purpose: the VPS had no proxy to join,
+# and Rules.md §7 is about stacks meeting at an external network rather than editing each
+# other's compose files. A future stack joins `proxy` and needs no change here beyond its
+# own block in the Caddyfile.
+#
+#   docker compose up -d
+#
+name: fileshare-proxy
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: fileshare-caddy
+    restart: unless-stopped
+    ports:
+      # Reachable only from Cloudflare's ranges — enforced in DOCKER-USER, because ufw
+      # does not filter published container ports (see deploy/02-firewall.sh).
+      - "80:80"
+      - "443:443"
+    environment:
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:?CADDY_ACME_EMAIL is required for Let's Encrypt}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Written by deploy/02-firewall.sh from Cloudflare's published ranges. Caddy needs it
+      # to keep the visitor's address in X-Forwarded-For rather than replacing it.
+      - /etc/fileshare/cloudflare-trusted-proxies.conf:/etc/caddy/cloudflare-trusted-proxies.conf:ro
+      # Certificates and ACME account keys. Losing this volume means re-issuing, which
+      # Let's Encrypt rate-limits, so it is a named volume rather than a bind mount.
+      - fileshare-caddy-data:/data
+      - fileshare-caddy-config:/config
+    networks: [proxy]
+
+volumes:
+  fileshare-caddy-data:
+  fileshare-caddy-config:
+
+networks:
+  proxy:
+    external: true
+    name: proxy

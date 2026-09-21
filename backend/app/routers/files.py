@@ -282,7 +282,10 @@ async def get_file(
     return await _out(db, file)
 
 
-@router.get("/files/{file_id}/download", response_model=DownloadResponse)
+# POST, not GET (Architecture §4.0, M8): issuing the URL writes an audit entry, and a
+# SameSite=Lax cookie still rides a cross-site top-level GET, so as a GET any page could
+# forge a "downloaded" entry in a signed-in visitor's name. POST puts it behind CSRF.
+@router.post("/files/{file_id}/download", response_model=DownloadResponse)
 async def download_file(
     file_id: uuid.UUID,
     request: Request,

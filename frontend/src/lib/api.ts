@@ -61,9 +61,22 @@ export type ScannerReport = {
   day_remaining?: number;
 };
 
+/**
+ * The Celery worker, reported beside the verdict from its own heartbeat (Architecture.md
+ * §7a, M8). `alive` is null when the heartbeat could not be read at all, which is not the
+ * same claim as the worker being gone.
+ */
+export type WorkerReport = {
+  alive: boolean | null;
+  workers?: number;
+  last_seen_seconds?: number;
+  detail?: string;
+};
+
 export type ReadinessResponse = {
   status: "ready" | "degraded";
   checks: Record<string, DependencyCheck>;
+  worker?: WorkerReport;
   scanner?: ScannerReport;
 };
 
@@ -89,34 +102,175 @@ export class NetworkError extends Error {
   }
 }
 
+// --- CSRF and session continuity (Architecture.md §4.0, M8) ----------------------
+
+const CSRF_HEADER = "X-CSRF-Token";
+const CSRF_FAILURE_CODE = "csrf_failed";
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/**
+ * Held in memory only. The token arrives in a response body precisely so that no cookie
+ * has to be readable by script; storing it in localStorage would undo that.
+ */
+let csrfToken: string | null = null;
+let csrfPending: Promise<string> | null = null;
+
+async function obtainCsrfToken(): Promise<string> {
+  if (csrfToken) return csrfToken;
+  // One request for the whole page, however many unsafe calls start at once.
+  csrfPending ??= (async () => {
+    let response: Response;
+    try {
+      response = await fetch(`${V1}/auth/csrf`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+    } catch {
+      throw new NetworkError();
+    }
+    const body = await response.json().catch(() => null);
+    if (!response.ok || !body?.csrf_token) {
+      throw new ApiError(readableDetail(body, response), response.status);
+    }
+    csrfToken = body.csrf_token as string;
+    return csrfToken;
+  })().finally(() => {
+    csrfPending = null;
+  });
+  return csrfPending;
+}
+
+/**
+ * Paths that must never trigger a refresh on 401: they either establish a session or
+ * end one, and refreshing around them would be a loop or a resurrection.
+ */
+const NO_REFRESH = new Set([
+  "/auth/login",
+  "/auth/signup",
+  "/auth/refresh",
+  "/auth/logout",
+  "/auth/logout-all",
+  "/auth/csrf",
+]);
+
+let refreshing: Promise<boolean> | null = null;
+
+/**
+ * Exchange the refresh cookie for a new access cookie, at most once at a time.
+ *
+ * Found at M8: the frontend never called `/auth/refresh` at all, so fifteen minutes after
+ * signing in — when the browser discards the access cookie — every action failed until a
+ * reload sent the person back to the sign-in page, and the 14-day refresh token went
+ * unused.
+ *
+ * Serialised, not merely deduplicated. The server treats a refresh token presented twice
+ * as stolen and revokes every session the account has (§4.0), so two refreshes racing
+ * with the same cookie would sign the person out everywhere. Within a page one shared
+ * promise prevents that; across tabs the Web Locks API does, and a tab that waited for
+ * the lock sends the cookie the first tab already rotated, which is valid.
+ */
+function refreshSession(): Promise<boolean> {
+  refreshing ??= (async () => {
+    const attempt = async (): Promise<boolean> => {
+      for (let tries = 0; tries < 2; tries += 1) {
+        const token = await obtainCsrfToken().catch(() => null);
+        if (!token) return false;
+        let response: Response;
+        try {
+          response = await fetch(`${V1}/auth/refresh`, {
+            method: "POST",
+            credentials: "include",
+            cache: "no-store",
+            headers: { [CSRF_HEADER]: token },
+          });
+        } catch {
+          return false;
+        }
+        const body = await response.json().catch(() => null);
+        if (response.ok) {
+          if (body?.csrf_token) csrfToken = body.csrf_token;
+          return true;
+        }
+        if (response.status === 403 && body?.code === CSRF_FAILURE_CODE) {
+          csrfToken = null;
+          continue;
+        }
+        return false;
+      }
+      return false;
+    };
+    if (typeof navigator !== "undefined" && navigator.locks) {
+      return navigator.locks.request("fileshare-session-refresh", attempt);
+    }
+    return attempt();
+  })().finally(() => {
+    refreshing = null;
+  });
+  return refreshing;
+}
+
 /**
  * Every request sends cookies — the session JWT lives in an httpOnly cookie, never in
  * localStorage, so an XSS bug cannot exfiltrate a session (Architecture.md §9).
+ *
+ * An unsafe request also carries the CSRF token. Two recoveries are attempted, each at
+ * most once per call: a token refused as stale is fetched again (another tab signed in or
+ * out, which rotates it), and a 401 is answered by refreshing the session and repeating
+ * the request.
  */
 export async function apiFetch<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
+  return send<T>(path, init, false, false);
+}
+
+async function send<T>(
+  path: string,
+  init: RequestInit,
+  csrfRetried: boolean,
+  refreshed: boolean,
+): Promise<T> {
+  const method = (init.method ?? "GET").toUpperCase();
+  const headers: Record<string, string> =
+    init.body instanceof FormData ? {} : { "Content-Type": "application/json" };
+  Object.assign(headers, init.headers as Record<string, string> | undefined);
+  if (UNSAFE_METHODS.has(method)) {
+    headers[CSRF_HEADER] = await obtainCsrfToken();
+  }
+
   let response: Response;
   try {
     response = await fetch(`${V1}${path}`, {
       ...init,
       credentials: "include",
       cache: "no-store",
-      headers:
-        init.body instanceof FormData
-          ? init.headers
-          : { "Content-Type": "application/json", ...init.headers },
+      headers,
     });
   } catch {
     throw new NetworkError();
   }
 
-  if (response.status === 204) return undefined as T;
+  if (response.status === 204) {
+    // Signing out rotates the token server-side; the one held here is now stale.
+    if (path === "/auth/logout" || path === "/auth/logout-all") csrfToken = null;
+    return undefined as T;
+  }
 
   const body = await response.json().catch(() => null);
+
+  if (response.status === 403 && body?.code === CSRF_FAILURE_CODE && !csrfRetried) {
+    csrfToken = null;
+    return send<T>(path, init, true, refreshed);
+  }
+  if (response.status === 401 && !refreshed && !NO_REFRESH.has(path)) {
+    if (await refreshSession()) return send<T>(path, init, csrfRetried, true);
+  }
   if (!response.ok) {
     throw new ApiError(readableDetail(body, response), response.status);
+  }
+  if (body && typeof body === "object" && "csrf_token" in body && body.csrf_token) {
+    csrfToken = body.csrf_token as string;
   }
   return body as T;
 }
@@ -256,6 +410,8 @@ export const items = {
       `/workspaces/${workspaceId}/files/${fileId}/download${
         versionId ? `?version_id=${encodeURIComponent(versionId)}` : ""
       }`,
+      // POST: issuing the URL is audited, so it must sit behind the CSRF check.
+      { method: "POST" },
     ),
   versions: (workspaceId: string, fileId: string) =>
     apiFetch<VersionOut[]>(`/workspaces/${workspaceId}/files/${fileId}/versions`),

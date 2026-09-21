@@ -383,7 +383,7 @@ async def test_a_flagged_file_cannot_be_shared_even_after_an_override(make_clien
         json={"reason": "Reviewed by hand, accepted for internal use only."},
     )
     assert released.status_code == 200
-    assert (await owner.get(f"{WS}/{ws}/files/{file_id}/download")).status_code == 200
+    assert (await owner.post(f"{WS}/{ws}/files/{file_id}/download")).status_code == 200
 
     # ...and sharing is still refused. This is the whole decision.
     still_refused = await owner.post(
@@ -644,7 +644,7 @@ async def test_a_share_url_is_signed_with_the_short_share_ttl(make_client, stub_
     # separate settings rather than one value renamed.
     file_id = (await upload_file(owner, ws, "internal.txt")).json()["id"]
     stub_storage["download_urls"].clear()
-    assert (await owner.get(f"{WS}/{ws}/files/{file_id}/download")).status_code == 200
+    assert (await owner.post(f"{WS}/{ws}/files/{file_id}/download")).status_code == 200
     assert stub_storage["download_urls"][0]["ttl_seconds"] is None
 
 

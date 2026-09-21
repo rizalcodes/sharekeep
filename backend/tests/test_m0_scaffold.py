@@ -197,3 +197,42 @@ def test_security_headers_are_set() -> None:
         response = client.get("/health")
     assert response.headers["X-Content-Type-Options"] == "nosniff"
     assert response.headers["X-Frame-Options"] == "DENY"
+
+
+# --- M8: settings that are present but wrong for production ------------------------
+
+def _production(**overrides) -> Settings:
+    values = dict(
+        environment="production",
+        jwt_secret=SecretStr("x" * 64),
+        frontend_origin="https://sharekeep.xyz",
+        cookie_secure=True,
+        cookie_domain=None,
+        trusted_proxy_hops=1,
+        notification_redirect_to=None,
+        resend_from_email="notifications@mail.sharekeep.xyz",
+    )
+    values.update(overrides)
+    return Settings(**values)
+
+
+def test_the_intended_production_configuration_is_accepted() -> None:
+    assert _production().production_configuration_errors() == []
+
+
+@pytest.mark.parametrize(
+    ("override", "names"),
+    [
+        ({"frontend_origin": "http://localhost:3000"}, "FILESHARE_FRONTEND_ORIGIN"),
+        ({"frontend_origin": "http://sharekeep.xyz"}, "FILESHARE_FRONTEND_ORIGIN"),
+        ({"cookie_secure": False}, "FILESHARE_COOKIE_SECURE"),
+        ({"cookie_domain": "sharekeep.xyz"}, "FILESHARE_COOKIE_DOMAIN"),
+        ({"trusted_proxy_hops": 0}, "FILESHARE_TRUSTED_PROXY_HOPS"),
+        ({"notification_redirect_to": "me@example.com"}, "FILESHARE_NOTIFICATION_REDIRECT_TO"),
+        ({"resend_from_email": "onboarding@resend.dev"}, "FILESHARE_RESEND_FROM_EMAIL"),
+        ({"jwt_secret": SecretStr("short")}, "FILESHARE_JWT_SECRET"),
+    ],
+)
+def test_each_quietly_wrong_production_setting_is_refused(override, names) -> None:
+    errors = _production(**override).production_configuration_errors()
+    assert len(errors) == 1 and names in errors[0], errors

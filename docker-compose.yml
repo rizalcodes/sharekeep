@@ -114,6 +114,8 @@ services:
       # requires `docker compose build frontend`, not just a restart.
       args:
         NEXT_PUBLIC_API_BASE_URL: ${FILESHARE_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        # Named in the frontend's CSP connect-src: upload parts go browser-direct there.
+        NEXT_PUBLIC_STORAGE_ORIGIN: ${FILESHARE_PUBLIC_STORAGE_ORIGIN:-}
     container_name: fileshare-frontend
     restart: unless-stopped
     depends_on: [backend]

@@ -114,6 +114,41 @@ async def db(db_engine) -> AsyncGenerator[AsyncSession, None]:
         await connection.close()
 
 
+def browser_like_client() -> httpx.AsyncClient:
+    """A client that behaves like the frontend with respect to CSRF (Architecture §4.0).
+
+    Every unsafe request carries `X-CSRF-Token`, copied from the cookie jar, fetching a
+    token first when the jar has none — which is what `apiFetch` does with the token it
+    was handed. The hook never overrides a header a test set itself, so a test can still
+    send a wrong one. Tests that prove the refusal use a bare `httpx.AsyncClient`.
+    """
+    from app.core import csrf
+
+    instance: httpx.AsyncClient
+
+    async def attach_token(request: httpx.Request) -> None:
+        if request.method not in csrf.UNSAFE_METHODS or csrf.HEADER_NAME in request.headers:
+            return
+        token = instance.cookies.get(csrf.cookie_name())
+        if token is None:
+            response = await instance.get("/api/v1/auth/csrf")
+            token = response.json()["csrf_token"]
+            # httpx attaches the Cookie header when it BUILDS a request, before this hook
+            # runs, so the cookie just issued is not on it yet. Without rebuilding it the
+            # first unsafe request of every client carried a token and no cookie.
+            if "cookie" in request.headers:
+                del request.headers["cookie"]
+            instance.cookies.set_cookie_header(request)
+        request.headers[csrf.HEADER_NAME] = token
+
+    instance = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://testserver",
+        event_hooks={"request": [attach_token]},
+    )
+    return instance
+
+
 @pytest_asyncio.fixture(loop_scope="session")
 async def client(db: AsyncSession) -> AsyncGenerator[httpx.AsyncClient, None]:
     """HTTP client whose requests share the test's rolled-back session."""
@@ -122,10 +157,7 @@ async def client(db: AsyncSession) -> AsyncGenerator[httpx.AsyncClient, None]:
         yield db
 
     app.dependency_overrides[get_db] = _override_get_db
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://testserver"
-    ) as async_client:
+    async with browser_like_client() as async_client:
         yield async_client
     app.dependency_overrides.clear()
 
@@ -144,9 +176,7 @@ async def make_client(db: AsyncSession):
             yield db
 
         app.dependency_overrides[get_db] = _override_get_db
-        instance = httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-        )
+        instance = browser_like_client()
         clients.append(instance)
         return instance
 

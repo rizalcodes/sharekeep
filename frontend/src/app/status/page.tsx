@@ -1,12 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { fetchReadiness, type DependencyCheck, type ReadinessResponse } from "@/lib/api";
+import {
+  fetchReadiness,
+  type DependencyCheck,
+  type ReadinessResponse,
+  type WorkerReport,
+} from "@/lib/api";
 
 const DEPENDENCY_LABELS: Record<string, string> = {
   database: "PostgreSQL",
   redis: "Redis",
-  celery: "Celery worker",
   storage: "Object storage",
 };
 
@@ -109,6 +113,7 @@ export default function Readiness() {
                 </li>
               ))}
             </ul>
+            <Worker worker={state.data.worker} />
             <Scanner scanner={state.data.scanner} />
           </>
         )}
@@ -136,15 +141,57 @@ function Verdict({ status }: { status: ReadinessResponse["status"] }) {
   );
 }
 
-/** What each check reports about itself, beyond ok/not — worker count, bucket, region. */
+/** What each check reports about itself, beyond ok/not — the storage bucket and region. */
 function describe(key: string, check: DependencyCheck): string | null {
-  if (key === "celery" && check.workers !== undefined) {
-    return `${check.workers} worker${check.workers === 1 ? "" : "s"} responding`;
-  }
   if (key === "storage" && check.bucket) {
     return [check.provider, check.bucket, check.region].filter(Boolean).join(" · ");
   }
   return null;
+}
+
+/**
+ * The background worker, beside the verdict rather than in it (Architecture.md §7a, M8).
+ *
+ * M7c watched a healthy worker, busy with thirteen scans, miss a two-second ping and turn
+ * the whole page "degraded". Uploads and downloads do not need the worker; scans do, and
+ * they wait. So a dead worker is shown plainly here, in the flagged colour, without
+ * claiming the service itself is down.
+ */
+function Worker({ worker }: { worker?: WorkerReport }) {
+  if (!worker) return null;
+  const label =
+    worker.alive === true
+      ? "alive"
+      : worker.alive === false
+        ? "not running"
+        : "unknown";
+  const tone =
+    worker.alive === true
+      ? "bg-status-clean-subtle text-status-clean"
+      : worker.alive === false
+        ? "bg-status-flagged-subtle text-status-flagged"
+        : "bg-status-unscanned-subtle text-status-unscanned";
+  const detail =
+    worker.alive === true
+      ? `${worker.workers ?? 1} worker${worker.workers === 1 ? "" : "s"} · last heartbeat ${Math.round(
+          worker.last_seen_seconds ?? 0,
+        )}s ago`
+      : worker.alive === false
+        ? "Uploads and downloads still work; malware scans wait until it is back."
+        : (worker.detail ?? "The heartbeat could not be read.");
+  return (
+    <div className="border-t border-border px-5 py-3">
+      <div className="flex items-center justify-between gap-4">
+        <span className="min-w-0">
+          <span className="block text-sm text-ink">Celery worker</span>
+          <span className="mt-0.5 block font-mono text-xs text-ink-subtle">{detail}</span>
+        </span>
+        <span className={`shrink-0 rounded-md px-2 py-0.5 font-mono text-xs ${tone}`}>
+          {label}
+        </span>
+      </div>
+    </div>
+  );
 }
 
 /**

@@ -108,7 +108,7 @@ async def test_a_grant_row_for_a_non_member_confers_nothing(make_client, db):
     # And through the API, the file is as invisible as before.
     assert (await outsider_client.get(f"{WS}/{ws}/files/{file_id}")).status_code == 404
     assert (
-        await outsider_client.get(f"{WS}/{ws}/files/{file_id}/download")
+        await outsider_client.post(f"{WS}/{ws}/files/{file_id}/download")
     ).status_code == 404
 
 
@@ -200,7 +200,7 @@ async def test_an_earlier_version_downloads_under_its_own_number(
     versions = (await owner.get(f"{WS}/{ws}/files/{first['id']}/versions")).json()
     oldest = next(v for v in versions if v["version_number"] == 1)
 
-    got = await owner.get(
+    got = await owner.post(
         f"{WS}/{ws}/files/{first['id']}/download", params={"version_id": oldest["id"]}
     )
     assert got.status_code == 200
@@ -218,7 +218,7 @@ async def test_a_version_of_another_file_is_indistinguishable_from_none(make_cli
     b = (await upload_file(owner, ws, "b.txt")).json()["id"]
     b_version = (await owner.get(f"{WS}/{ws}/files/{b}/versions")).json()[0]["id"]
 
-    wrong = await owner.get(f"{WS}/{ws}/files/{a}/download", params={"version_id": b_version})
+    wrong = await owner.post(f"{WS}/{ws}/files/{a}/download", params={"version_id": b_version})
     assert wrong.status_code == 404
 
 
@@ -236,12 +236,12 @@ async def test_an_old_version_is_judged_by_its_own_scan_result(make_client, db):
     old.scan_status = ScanStatus.FLAGGED
     await db.commit()
 
-    refused = await owner.get(
+    refused = await owner.post(
         f"{WS}/{ws}/files/{file_id}/download", params={"version_id": str(old.id)}
     )
     assert refused.status_code == 403
     # The current version, clean, is unaffected.
-    assert (await owner.get(f"{WS}/{ws}/files/{file_id}/download")).status_code == 200
+    assert (await owner.post(f"{WS}/{ws}/files/{file_id}/download")).status_code == 200
 
 
 # --- Rollback (Architecture §4.9) ------------------------------------------------

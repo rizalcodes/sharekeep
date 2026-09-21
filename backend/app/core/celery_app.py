@@ -9,6 +9,7 @@ from __future__ import annotations
 from celery import Celery
 from celery.schedules import crontab
 
+from app.core import worker_heartbeat  # noqa: F401 - registers the worker signals
 from app.core.config import settings
 
 celery_app = Celery(

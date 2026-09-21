@@ -4,11 +4,12 @@ All environment variables use the FILESHARE_ prefix (Rules.md §2) so this proje
 cannot collide with the AGENCY_-prefixed variables of the n8n project sharing the VPS.
 """
 
+import re
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # VirusTotal submission ceilings (Architecture.md §3). Defaults reflect the public API
@@ -59,6 +60,22 @@ class Settings(BaseSettings):
     cookie_secure: bool = True
     cookie_domain: str | None = None
 
+    # --- Proxies (Architecture.md §4.4, M8) ---
+    # How many reverse proxies stand between the internet and this process. The client
+    # address is read that many entries from the RIGHT of X-Forwarded-For, because each
+    # proxy appends what it saw and everything to the left of that was written by the
+    # client. 0 ignores the header entirely. Until M8 the leftmost entry was used, which
+    # let any visitor choose their own address: a new one per request walked straight
+    # through every per-IP limit.
+    trusted_proxy_hops: int = Field(default=0, ge=0, le=5)
+
+    # --- Sign-up (Architecture.md §4.0, M8) ---
+    # In production, who may create an account without an invitation. Comma-separated,
+    # case-insensitive, may be empty (invitation-only). Every account draws on one free
+    # tier, so open sign-up on the public internet would let one stranger fill the bucket.
+    # Ignored outside production.
+    signup_allowlist: str = ""
+
     # --- Frontend / CORS ---
     frontend_origin: str = "http://localhost:3000"
 
@@ -80,6 +97,10 @@ class Settings(BaseSettings):
     # Overrides the endpoint derived from supabase_url; also the hook for a local
     # MinIO/LocalStack or self-hosted Supabase.
     storage_endpoint_url: str | None = None
+    # Encrypted database dumps go to their own bucket (Architecture.md §7, M8b), so a
+    # listing of the file bucket never sees them and vice versa.
+    backup_bucket: str | None = None
+
     # Provider-side per-file ceiling. Enforced at upload-init so the user gets a clean
     # rejection instead of a provider error mid-upload.
     max_file_size_bytes: int = SUPABASE_FREE_PLAN_FILE_LIMIT_BYTES
@@ -196,6 +217,15 @@ class Settings(BaseSettings):
         return self.environment == "production"
 
     @property
+    def signup_allowlist_emails(self) -> frozenset[str]:
+        return frozenset(
+            entry.strip().lower() for entry in self.signup_allowlist.split(",") if entry.strip()
+        )
+
+    def may_sign_up_without_invitation(self, email: str) -> bool:
+        return not self.is_production or email.strip().lower() in self.signup_allowlist_emails
+
+    @property
     def celery_broker_url(self) -> str:
         return _swap_redis_db(self.redis_url, self.celery_broker_db)
 
@@ -247,6 +277,59 @@ class Settings(BaseSettings):
         if self.jwt_secret.get_secret_value().startswith("dev-only"):
             missing.append("FILESHARE_JWT_SECRET")
         return missing
+
+    def production_configuration_errors(self) -> list[str]:
+        """Settings that are present but wrong for production (M8).
+
+        Each of these starts cleanly and fails quietly later, which is why they are refused
+        at boot rather than discovered by a user: every emailed link pointing at the
+        recipient's own machine, every visitor sharing the proxy's single rate-limit
+        bucket, mail silently redirected to the developer.
+        """
+        errors: list[str] = []
+        origin = urlparse(self.frontend_origin)
+        if origin.scheme != "https" or origin.hostname in {"localhost", "127.0.0.1", "::1"}:
+            errors.append(
+                "FILESHARE_FRONTEND_ORIGIN must be the public https origin; every emailed "
+                "link and the CORS allowance are built from it"
+            )
+        if not self.cookie_secure:
+            errors.append("FILESHARE_COOKIE_SECURE must be true")
+        if self.cookie_domain:
+            errors.append(
+                "FILESHARE_COOKIE_DOMAIN must be unset: auth cookies stay host-only on the "
+                "API host, and the CSRF cookie cannot use its __Host- prefix with a domain"
+            )
+        if self.trusted_proxy_hops < 1:
+            errors.append(
+                "FILESHARE_TRUSTED_PROXY_HOPS must be at least 1 behind the reverse proxy; "
+                "at 0 every visitor has the proxy's address and shares one rate limit"
+            )
+        if self.notification_redirect_to:
+            errors.append(
+                "FILESHARE_NOTIFICATION_REDIRECT_TO must be unset: it sends every "
+                "notification to one address"
+            )
+        if self.resend_from_email.endswith("@resend.dev"):
+            errors.append(
+                "FILESHARE_RESEND_FROM_EMAIL must be on the verified sending domain, not "
+                "Resend's sandbox sender"
+            )
+        if len(self.jwt_secret.get_secret_value().encode()) < 32:
+            errors.append("FILESHARE_JWT_SECRET must be at least 32 bytes")
+        # A value copied from the template and never filled in. Caught here because the
+        # failure otherwise arrives much later and names a host nobody typed: a leftover
+        # <project_ref> in the Supabase URL becomes the S3 endpoint
+        # https://<project_ref>.storage.supabase.co, and only the first storage call says so.
+        for name, value in (
+            ("FILESHARE_SUPABASE_URL", self.supabase_url),
+            ("FILESHARE_FRONTEND_ORIGIN", self.frontend_origin),
+            ("FILESHARE_SUPABASE_STORAGE_BUCKET", self.supabase_storage_bucket),
+            ("FILESHARE_RESEND_FROM_EMAIL", self.resend_from_email),
+        ):
+            if value and re.search(r"<[a-z_]+>", value):
+                errors.append(f"{name} still holds a template placeholder: {value}")
+        return errors
 
 
 def _swap_redis_db(url: str, db_index: int) -> str:

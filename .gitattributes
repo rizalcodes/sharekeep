@@ -1,0 +1,16 @@
+# Line endings, pinned for the files Linux executes or parses (M8b).
+#
+# This repository is edited on Windows and deployed to Ubuntu. A shell script checked out
+# with CRLF fails on Linux with "bad interpreter: no such file or directory", and a CRLF
+# .env gives every variable a trailing carriage return — which would put "\r" on the end
+# of a URL or a secret and produce failures that read like anything but a line ending.
+
+* text=auto
+
+*.sh            text eol=lf
+Caddyfile       text eol=lf
+Dockerfile      text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+.env.example    text eol=lf
+env.production.example text eol=lf

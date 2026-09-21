@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
+from app.core.csrf import CSRFMiddleware
 from app.core.database import engine
 from app.core.logging import configure_logging
 from app.routers import (
@@ -38,6 +39,11 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(
                 "refusing to start in production without: " + ", ".join(sorted(missing))
             )
+        errors = settings.production_configuration_errors()
+        if errors:
+            raise RuntimeError(
+                "refusing to start in production with: " + " | ".join(errors)
+            )
     yield
     await engine.dispose()
     logger.info("fileshare API shut down")
@@ -51,6 +57,11 @@ app = FastAPI(
     openapi_url=None if settings.is_production else "/openapi.json",
     lifespan=lifespan,
 )
+
+# Added BEFORE CORS so that CORS wraps it: Starlette makes the last-added middleware the
+# outermost. A CSRF refusal must still carry CORS headers, or the browser reports it as
+# a network failure and the frontend cannot tell a stale token from an outage.
+app.add_middleware(CSRFMiddleware)
 
 app.add_middleware(
     CORSMiddleware,

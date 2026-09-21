@@ -25,6 +25,13 @@ const plexMono = IBM_Plex_Mono({
   display: "swap",
 });
 
+/**
+ * Rendered per request, so `proxy.ts` can mint a CSP nonce for each document (M8). A page
+ * generated at build time has no request to take a nonce from, and its inline hydration
+ * script would then be refused by the policy.
+ */
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "Secure File Sharing Platform",
   description:
