@@ -148,6 +148,22 @@ echo "IPv4 rules now in DOCKER-USER:"
 $SUDO iptables -S DOCKER-USER | sed -n '1,6p'
 echo "  ... $($SUDO iptables -S DOCKER-USER | grep -c 'fileshare-cf') fileshare rules total"
 
+say "Telling Caddy which proxy to believe"
+# Caddy only preserves an incoming X-Forwarded-For when the request came from an address
+# in trusted_proxies; otherwise it REPLACES the header with the peer's address. Observed,
+# not assumed: without this, the backend received a single entry (Cloudflare's edge) and
+# recorded that as the visitor, so every audit row showed a Cloudflare address and every
+# per-IP limit counted the whole world as one visitor. Generated here so the firewall and
+# the proxy cannot disagree about who Cloudflare is (Architecture 4.4).
+TRUSTED_CONF="$CACHE_DIR/cloudflare-trusted-proxies.conf"
+{
+  printf 'trusted_proxies static'
+  for cidr in $V4 $V6; do printf ' %s' "$cidr"; done
+  printf '\n'
+} | $SUDO tee "$TRUSTED_CONF" >/dev/null
+echo "wrote $TRUSTED_CONF ($(wc -w < "$TRUSTED_CONF") entries)"
+echo "  reload Caddy to pick it up: cd deploy/proxy && docker compose up -d --force-recreate caddy"
+
 say "Making them survive a reboot"
 SCRIPT_PATH=$(readlink -f "$0")
 IPTABLES=$(command -v iptables || echo /usr/sbin/iptables)

@@ -61,9 +61,14 @@ def test_two_proxies_means_second_from_the_right(hops):
     assert audit.client_ip(_request(f"{forged}, {client}, {outer_proxy}")) == client
 
 
-def test_fewer_entries_than_hops_uses_the_furthest_trusted_one(hops):
+def test_fewer_entries_than_hops_is_not_guessed_at(hops):
+    """Changed at M8c. This used to return the leftmost entry on the theory that every
+    entry present came from a trusted proxy. In production that theory produced a wrong
+    but plausible answer — Cloudflare's own edge address, recorded as the visitor on every
+    audited action — because the proxy was replacing the header rather than appending to
+    it. An obviously internal address makes the misconfiguration visible instead."""
     hops(2)
-    assert audit.client_ip(_request("198.51.100.4")) == "198.51.100.4"
+    assert audit.client_ip(_request("198.51.100.4")) == PEER
 
 
 def test_no_header_behind_a_proxy_falls_back_to_the_peer(hops):
@@ -144,3 +149,13 @@ async def test_a_malformed_header_cannot_break_the_audit_write(client, hops):
         headers={"X-Forwarded-For": "definitely not an address"},
     )
     assert response.status_code == 401
+
+
+def test_a_shorter_chain_than_configured_is_reported_not_guessed(hops, caplog):
+    """M8c: Caddy replaced X-Forwarded-For instead of appending, so the backend saw one
+    entry — Cloudflare's edge — and the old fallback recorded that as the visitor. Wrong
+    but plausible, on every audited action, with nothing appearing broken."""
+    hops(2)
+    with caplog.at_level("WARNING"):
+        assert audit.client_ip(_request("172.71.81.120")) == PEER
+    assert "trusted" in caplog.text.lower()

@@ -23,6 +23,9 @@ services:
       CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:?CADDY_ACME_EMAIL is required for Let's Encrypt}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Written by deploy/02-firewall.sh from Cloudflare's published ranges. Caddy needs it
+      # to keep the visitor's address in X-Forwarded-For rather than replacing it.
+      - /etc/fileshare/cloudflare-trusted-proxies.conf:/etc/caddy/cloudflare-trusted-proxies.conf:ro
       # Certificates and ACME account keys. Losing this volume means re-issuing, which
       # Let's Encrypt rate-limits, so it is a named volume rather than a bind mount.
       - fileshare-caddy-data:/data

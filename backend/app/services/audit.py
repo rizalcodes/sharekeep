@@ -10,6 +10,7 @@ Append-only: this module offers no update or delete.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import uuid
 from typing import Any
 
@@ -19,6 +20,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.enums import AuditAction, AuditTargetType
 from app.models.identity import AuditLog
+
+logger = logging.getLogger(__name__)
 
 
 def client_ip(request: Request | None) -> str | None:
@@ -47,10 +50,22 @@ def client_ip(request: Request | None) -> str | None:
     entries = [entry for entry in entries if entry]
     if not entries:
         return peer
-    # Fewer entries than trusted hops means the request skipped an outer proxy; every
-    # entry present was still appended by a proxy we trust, so the furthest one is the
-    # best observation we have.
-    candidate = entries[-hops] if len(entries) >= hops else entries[0]
+    if len(entries) < hops:
+        # Fewer entries than trusted hops means the chain is not what this deployment was
+        # configured for, and we cannot say who the client is. Returning the leftmost entry
+        # — as this did until M8c — produces an answer that is wrong but *plausible*: in
+        # production it recorded Cloudflare's own edge address as the visitor on every
+        # audited action, and nothing looked broken. The peer is obviously internal, so a
+        # misconfiguration shows up as one instead of hiding.
+        logger.warning(
+            "x-forwarded-for has %d entr%s but %d proxy hop(s) are trusted; "
+            "recording the peer instead. Check the reverse proxy's trusted-proxy list.",
+            len(entries),
+            "y" if len(entries) == 1 else "ies",
+            hops,
+        )
+        return peer
+    candidate = entries[-hops]
     try:
         return str(ipaddress.ip_address(candidate))
     except ValueError:
