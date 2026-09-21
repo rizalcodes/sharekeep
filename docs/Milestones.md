@@ -13,7 +13,7 @@ has actually been performed, not when the code merely exists (Rules.md §6).
 | M5 | Sharing: 4 link types, password protection, expiry, modifiers | **Done** (11 Sep 2026) |
 | M6 | Audit log UI + email notifications (Resend) | **Done** (12 Sep 2026) — first marked Done on 11 Sep in error; see the M6 record |
 | M7 | Complete the interface, search + tags, design pass (three stages, PRD §10e) | **Done** (15 Sep 2026) |
-| M8 | Deployment to the shared VPS, end-to-end verification | In progress |
+| M8 | Deployment to the VPS, end-to-end verification | **Done** (21 Sep 2026) |
 
 ---
 
@@ -1323,8 +1323,8 @@ before any code.
 | Stage | Scope | Needs the VPS |
 |---|---|---|
 | M8a | Code: CSRF tokens, client-IP hops, sign-up allowlist, download as POST, worker heartbeat, production settings checks, CSP | **Done** (18 Sep 2026) |
-| M8b | VPS: Docker, firewall, Caddy, TLS, production `.env`, buckets, Resend domain, backup job, first deploy, migrations | In progress |
-| M8c | Verification from outside: headers, cookies, CSRF refusal, forged-header refusal, invitation to a second person, restore drill, heartbeat under scan load | Yes |
+| M8b | VPS: Docker, firewall, Caddy, TLS, production `.env`, buckets, Resend domain, backup job, first deploy, migrations | **Done** (20 Sep 2026) |
+| M8c | Verification from outside: headers, cookies, CSRF refusal, forged-header refusal, invitation to a second person, restore drill, heartbeat under scan load | **Done** (21 Sep 2026) |
 
 ### M8a — the seven code items, and what they found
 
@@ -1442,3 +1442,40 @@ running the thing rather than reasoning about it.
 - **The boot path fetched over a network that was not up yet**, and `set -e` ended the
   script before any rule existed. Now: retries, a cached copy in `/etc/fileshare`, and
   closing the ports outright if neither is available.
+
+## M8c — verification from outside · Done
+
+Run as an ordinary client on the public internet, through Cloudflare, with no privileged
+access to the host: what a visitor or an attacker can actually reach, rather than what the
+logs on the box claim.
+
+| # | Check | Evidence |
+|---|---|---|
+| 1 | TLS as a client sees it | `ssl_verify_result=0`, CN `sharekeep.xyz`, Let's Encrypt, valid to 17 Dec; `www` 301s to the apex |
+| 2 | Security headers and CSP | HSTS, `frame-ancestors 'none'`, nosniff, no-referrer, nonce CSP naming only the app, the API and the storage host — **and enforced in Chrome**: an injected inline handler did not run, a fetch to an unnamed origin was refused |
+| 3 | Cookie flags | `__Host-fileshare_csrf; HttpOnly; Path=/; SameSite=lax; Secure`, no `Domain` |
+| 4 | CSRF refusal | no header 403 `csrf_failed`; guessed token 403; PUT/PATCH/DELETE 403; **matching pair 401**, so the guard passes legitimate traffic; `/health/ready` unguarded |
+| 5 | Forged `X-Forwarded-For` | 429 at attempt **31** with a new claimed address per request; audit log recorded the real IPv6 visitor for all three probes, including one padding three fake entries in front to shift the window |
+| 6 | Invitation to a second person | delivered from `notifications@mail.sharekeep.xyz`, no redirect banner, link on our own domain, second account joined the workspace |
+| 7 | Restore drill | `RESTORE DRILL PASSED` — all 11 tables identical between live and restored |
+| 8 | Heartbeat under scan load | 8-10 simultaneous uploads: every sample `200` with `"alive":true` |
+| — | Extras | `cf-cache-status: DYNAMIC` (Cloudflare caches no API response); the origin address answers neither 80 nor 443 |
+
+### The defect M8c found
+
+**Every audited action recorded Cloudflare's edge address as the visitor**, for a day,
+including the developer's own sign-in. Hop arithmetic assumes each proxy *appends* to
+`X-Forwarded-For`; Caddy does so only for a sender in its `trusted_proxies` list, and
+otherwise **replaces** the header. With the list unset the backend saw one entry and the
+short-chain fallback returned it. Two fixes, and the second matters more than the first:
+the list is now generated from the same Cloudflare ranges the firewall admits, and a chain
+shorter than the configured hop count is reported rather than guessed — the old fallback is
+exactly what made a misconfigured proxy look healthy. A comment in the Caddyfile asserting
+that Caddy appends was simply wrong, and believing it is why `hops=2` looked sufficient.
+
+Three harness faults of my own, each corrected rather than worked around: the CSP
+violations counted against the app were the two attacks the test itself injected; an
+`ERR_ABORTED` on an RSC prefetch was my own navigation cancelling it (checked separately —
+the prefetch returns 200 undisturbed and `/login` to `/signup` navigates client-side with
+no console errors); and `playwright-core` had been cleaned out of the scratchpad, which is
+why the first production browser run could not start at all.
